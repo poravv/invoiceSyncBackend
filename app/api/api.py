@@ -8,9 +8,9 @@ from typing import List, Optional
 import shutil
 from datetime import datetime
 
-from config.settings import settings
-from models.models import InvoiceData, EmailConfig, ProcessResult, JobStatus
-from main import InvoiceSync
+from app.config.settings import settings
+from app.models.models import InvoiceData, EmailConfig, ProcessResult, JobStatus
+from app.main import InvoiceSync
 
 # Configurar logging
 logging.basicConfig(

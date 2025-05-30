@@ -10,10 +10,10 @@ from typing import List, Tuple, Optional, Dict, Any
 import re
 from datetime import datetime
 
-from config.settings import settings
-from models.models import EmailConfig, InvoiceData, ProcessResult
-from modules.openai_processor.openai_processor import OpenAIProcessor
-from modules.excel_exporter.excel_exporter import ExcelExporter
+from app.config.settings import settings
+from app.models.models import EmailConfig, InvoiceData, ProcessResult
+from app.modules.openai_processor.openai_processor import OpenAIProcessor
+from app.modules.excel_exporter.excel_exporter import ExcelExporter
 
 logger = logging.getLogger(__name__)
 

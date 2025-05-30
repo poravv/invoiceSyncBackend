@@ -12,8 +12,8 @@ import openai
 import fitz  # PyMuPDF
 from PIL import Image
 
-from config.settings import settings
-from models.models import InvoiceData, EmpresaData, TimbradoData, FacturaData, ClienteData, TotalesData, ProductoFactura
+from app.config.settings import settings
+from app.models.models import InvoiceData, EmpresaData, TimbradoData, FacturaData, ClienteData, TotalesData, ProductoFactura
 
 logger = logging.getLogger(__name__)
 
@@ -204,11 +204,6 @@ class OpenAIProcessor:
                     
                     if json_match:
                         result = json_match.group(1)
-                    
-                    # Imprimir el JSON extraído para depuración
-                    print("\n=== JSON EXTRAÍDO ===")
-                    print(result)
-                    print("=== FIN JSON EXTRAÍDO ===\n")
                     
                     # Parsear el JSON y procesar los datos
                     result_json = json.loads(result)

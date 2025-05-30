@@ -33,7 +33,8 @@ class Settings(BaseSettings):
     EMAIL_SEARCH_TERMS: List[str] = []
     
     model_config = {
-        "env_file": ".env"
+        "env_file": ".env",
+        "extra": "ignore"  # Ignorar campos adicionales en lugar de lanzar un error
     }
 
     def model_post_init(self, __context):

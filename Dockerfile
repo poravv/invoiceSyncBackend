@@ -13,18 +13,18 @@ RUN apt-get update && apt-get install -y \
 # Establecer directorio de trabajo
 WORKDIR /app
 
+# Crear directorios necesarios
+RUN mkdir -p /app/data/temp_pdfs
+
 # Copiar archivos de requerimientos
 COPY requirements.txt .
 
-# Instalar dependencias
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Descargar modelos de spaCy
-RUN python -m spacy download es_core_news_md
-RUN python -m spacy download en_core_web_md
-
-# Crear directorios necesarios
-RUN mkdir -p /app/data/temp_pdfs
+# Instalar dependencias y spaCy de forma explícita
+RUN pip install --no-cache-dir numpy==1.24.3 && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir spacy==3.6.1 && \
+    python -m spacy download es_core_news_md && \
+    python -m spacy download en_core_web_md
 
 # Copiar código fuente
 COPY . .
@@ -37,4 +37,4 @@ ENV TESSERACT_PATH=/usr/bin/tesseract
 EXPOSE 8000
 
 # Comando por defecto
-CMD ["python", "start.py", "--mode=api"]
+CMD ["python", "app/server.py"]

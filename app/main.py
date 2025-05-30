@@ -5,11 +5,11 @@ from typing import List, Dict, Any, Optional
 import argparse
 from datetime import datetime
 
-from config.settings import settings
-from models.models import InvoiceData, ProcessResult, EmailConfig, JobStatus
-from modules.email_processor.email_processor import EmailProcessor
-from modules.openai_processor.openai_processor import OpenAIProcessor
-from modules.excel_exporter.excel_exporter import ExcelExporter
+from app.config.settings import settings
+from app.models.models import InvoiceData, ProcessResult, EmailConfig, JobStatus
+from app.modules.email_processor.email_processor import EmailProcessor
+from app.modules.openai_processor.openai_processor import OpenAIProcessor
+from app.modules.excel_exporter.excel_exporter import ExcelExporter
 
 # Configurar logging
 logging.basicConfig(

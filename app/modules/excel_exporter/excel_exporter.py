@@ -6,8 +6,8 @@ from datetime import datetime
 import openpyxl
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 
-from models.models import InvoiceData
-from config.settings import settings
+from app.models.models import InvoiceData
+from app.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
