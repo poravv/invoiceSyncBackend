@@ -192,17 +192,28 @@ class OpenAIProcessor:
                     max_tokens=1000,
                     temperature=0.3
                 )
-                print(f"##############################################################################")
-                print(response)
-                print(f"##############################################################################")
+
+                # Imprimir la respuesta completa para depuración
+                print("\n\n=== RESPUESTA COMPLETA DE OPENAI ===")
+                print(json.dumps(response, indent=2))
+                print("=== FIN DE RESPUESTA DE OPENAI ===\n\n")
 
                 result = response['choices'][0]['message']['content']
                 try:
                     # Extraer el JSON si está dentro de backticks
+                    json_match = None
                     if "```json" in result:
-                        result = re.search(r'```json\n(.*?)\n```', result, re.DOTALL).group(1)
+                        json_match = re.search(r'```json\n(.*?)\n```', result, re.DOTALL)
                     elif "```" in result:
-                        result = re.search(r'```\n(.*?)\n```', result, re.DOTALL).group(1)
+                        json_match = re.search(r'```\n(.*?)\n```', result, re.DOTALL)
+                    
+                    if json_match:
+                        result = json_match.group(1)
+                    
+                    # Imprimir el JSON extraído para depuración
+                    print("\n=== JSON EXTRAÍDO ===")
+                    print(result)
+                    print("=== FIN JSON EXTRAÍDO ===\n")
                     
                     # Parsear el JSON y procesar los datos
                     result_json = json.loads(result)
@@ -219,14 +230,30 @@ class OpenAIProcessor:
                     
                     # Procesar campos de texto
                     text_fields = [
-                        "ruc_emisor", "nombre_emisor", "numero_factura",
-                        "timbrado", "cdc", "ruc_cliente", "nombre_cliente",
+                        "nombre_emisor", "numero_factura",
+                        "timbrado", "cdc", "nombre_cliente",
                         "email_cliente", "condicion_venta", "actividad_economica"
                     ]
                     for field in text_fields:
                         value = result_json.get(field)
                         if value and isinstance(value, str):
                             processed_data[field] = value.strip()
+                    
+                    # Procesar RUCs (mantener con guiones si existen)
+                    ruc_fields = ["ruc_emisor", "ruc_cliente"]
+                    for field in ruc_fields:
+                        value = result_json.get(field)
+                        if value and isinstance(value, str):
+                            # Agregar guiones al RUC si no los tiene
+                            if "-" not in value and len(value) > 1:
+                                # Para RUCs de empresas (8 dígitos + DV)
+                                if len(value) >= 8:
+                                    processed_data[field] = f"{value[:-1]}-{value[-1]}"
+                                else:
+                                    # Para RUCs de personas (6-7 dígitos + DV)
+                                    processed_data[field] = f"{value[:-1]}-{value[-1]}"
+                            else:
+                                processed_data[field] = value.strip()
                     
                     # Procesar campos numéricos
                     numeric_fields = [
@@ -244,14 +271,59 @@ class OpenAIProcessor:
                     processed_data["moneda"] = result_json.get("moneda", "PYG")
                     
                     # Procesar datos estructurados
-                    structured_fields = ["empresa", "timbrado_data", "factura_data", "cliente", "totales", "productos"]
-                    for field in structured_fields:
+                    # Empresa
+                    if "empresa" in result_json:
+                        empresa_data = result_json["empresa"]
+                        # Asegurar que el RUC tenga guiones
+                        if "ruc" in empresa_data and "-" not in empresa_data["ruc"] and len(empresa_data["ruc"]) > 1:
+                            if len(empresa_data["ruc"]) >= 8:  # RUC de empresa
+                                empresa_data["ruc"] = f"{empresa_data['ruc'][:-1]}-{empresa_data['ruc'][-1]}"
+                            else:  # RUC de persona
+                                empresa_data["ruc"] = f"{empresa_data['ruc'][:-1]}-{empresa_data['ruc'][-1]}"
+                        processed_data["empresa"] = empresa_data
+                    
+                    # Cliente
+                    if "cliente" in result_json:
+                        cliente_data = result_json["cliente"]
+                        # Asegurar que el RUC tenga guiones
+                        if "ruc" in cliente_data and "-" not in cliente_data["ruc"] and len(cliente_data["ruc"]) > 1:
+                            if len(cliente_data["ruc"]) >= 8:  # RUC de empresa
+                                cliente_data["ruc"] = f"{cliente_data['ruc'][:-1]}-{cliente_data['ruc'][-1]}"
+                            else:  # RUC de persona
+                                cliente_data["ruc"] = f"{cliente_data['ruc'][:-1]}-{cliente_data['ruc'][-1]}"
+                        processed_data["cliente"] = cliente_data
+                    
+                    # Otros datos estructurados
+                    other_structured_fields = ["timbrado_data", "factura_data", "totales", "productos"]
+                    for field in other_structured_fields:
                         if field in result_json:
                             processed_data[field] = result_json[field]
                     
+                    # Convertir campos numéricos en totales
+                    if "totales" in processed_data:
+                        numeric_total_fields = ["subtotal", "total_a_pagar", "iva_0%", "iva_5%", "iva_10%", "total_iva"]
+                        for field in numeric_total_fields:
+                            field_key = field
+                            if field in processed_data["totales"]:
+                                value = self._convert_to_number(processed_data["totales"][field])
+                                if value is not None:
+                                    processed_data["totales"][field] = value
+                            
+                    # Convertir campos numéricos en productos
+                    if "productos" in processed_data and isinstance(processed_data["productos"], list):
+                        for producto in processed_data["productos"]:
+                            numeric_product_fields = ["cantidad", "precio_unitario", "total"]
+                            for field in numeric_product_fields:
+                                if field in producto:
+                                    value = self._convert_to_number(producto[field])
+                                    if value is not None:
+                                        producto[field] = value
+                    
                     logger.debug(f"Datos extraídos y procesados: {processed_data}")
                     
-                    logger.info(f"Datos procesados: {processed_data}")
+                    # Registrar datos procesados en formato legible
+                    logger.info(f"Datos procesados: {json.dumps(processed_data, indent=2, default=str)}")
+                    
                     return processed_data
                     
                 except json.JSONDecodeError as e:
