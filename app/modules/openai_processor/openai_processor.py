@@ -193,11 +193,6 @@ class OpenAIProcessor:
                     temperature=0.3
                 )
 
-                # Imprimir la respuesta completa para depuración
-                print("\n\n=== RESPUESTA COMPLETA DE OPENAI ===")
-                print(json.dumps(response, indent=2))
-                print("=== FIN DE RESPUESTA DE OPENAI ===\n\n")
-
                 result = response['choices'][0]['message']['content']
                 try:
                     # Extraer el JSON si está dentro de backticks
