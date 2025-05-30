@@ -1,0 +1,76 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Environment directories
+venv/
+env/
+ENV/
+.env
+.venv
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Logs and databases
+*.log
+*.sqlite3
+*.db
+
+# Temporary files
+data/temp_pdfs/
+data/temp/
+*.tmp
+
+# Cache
+.cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Distribution / packaging
+.Python
+.installed.cfg
+
+# Local development settings
+local_settings.py
+
+# Media files uploaded by users
+media/
+
+# Private files (like API keys, etc.)
+.env.local
+.env.*.local
+
+# Excel and CSV files (for data processing)
+*.xlsx
+*.csv
+
+# Uncomment if you want to ignore all PDF files
+# *.pdf
+
+# Uncomment if you want to ignore all data files (keep directory structure)
+# data/*
+# !data/.gitkeep
