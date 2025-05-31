@@ -113,7 +113,7 @@ class EmailConfig(BaseModel):
     username: str
     password: str
     search_criteria: str = "UNSEEN"
-    search_terms: List[str] = ["factura", "facturacion", "factura electronica", "comprobante","Documento Electronico","Documento electronico","documento electrónico", "documento electronico"]
+    search_terms: List[str] = ["factura", "facturacion", "factura electronica", "comprobante","Documento Electronico","Documento electronico","documento electrónico", "documento electronico","DOCUMENTO ELECTRONICO", "DOCUMENTO ELECTRÓNICO"]
 
 class ProcessResult(BaseModel):
     """Resultado del procesamiento de facturas."""
