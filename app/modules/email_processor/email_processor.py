@@ -273,7 +273,8 @@ class EmailProcessor:
         
         # Patrones para buscar diferentes tipos de enlaces
         pdf_url_pattern = r'https?://[^\s<>"]+\.pdf'
-        siga_pattern = r'https?://facte\.siga\.com\.py/[^\s<>"]*'
+        # Para mi yo del futuro, verificar las URLS de las compañías que envian sus facturas por este metodo.
+        #siga_pattern = r'https?://facte\.siga\.com\.py/[^\s<>"]*'
         
         # Buscar en partes HTML y de texto
         for part in message.walk():
@@ -295,8 +296,8 @@ class EmailProcessor:
                     links.extend(pdf_links)
                     
                     # Buscar enlaces de facturas electrónicas SIGA
-                    siga_links = re.findall(siga_pattern, content)
-                    links.extend(siga_links)
+                    # siga_links = re.findall(siga_pattern, content)
+                    # links.extend(siga_links)
                     
                     # Si es contenido HTML, buscar enlaces adicionales usando BeautifulSoup
                     if content_type == "text/html":
@@ -307,8 +308,10 @@ class EmailProcessor:
                             # Palabras clave para identificar enlaces de facturas
                             factura_keywords = [
                                 'visualizar documento', 'ver factura', 'descargar factura', 
-                                'factura electronica', 'factura electrónica', 'visualizar',
-                                'descargar xml', 'ver documento'
+                                'factura electronica', 'visualizar',
+                                'descargar xml', 'ver documento',
+                                'pdf', 'imprimir', 'download', 'print','VISUALIZAR DOCUMENTO',
+                                'factura electrónica', 'generar pdf', 'exportar pdf', 'ver pdf'
                             ]
                             
                             # Buscar enlaces <a> con texto relacionado a facturas
@@ -407,11 +410,34 @@ class EmailProcessor:
             content_type = response.headers.get("Content-Type", "").lower()
             logger.info(f"Tipo de contenido recibido: {content_type}")
             
-            # Si es un PDF directo
-            if content_type.startswith("application/pdf"):
+            # Verificar si tenemos contenido
+            content_bytes = response.content
+            if not content_bytes:
+                logger.warning("Respuesta vacía, no hay contenido para procesar")
+                return ""
+            
+            # Verificar si el contenido es realmente un PDF analizando los primeros bytes
+            is_pdf_content = content_bytes.startswith(b'%PDF-')
+            is_xml_content = content_bytes.startswith(b'<?xml')
+            
+            logger.info(f"Análisis de contenido - PDF: {is_pdf_content}, XML: {is_xml_content}, Tamaño: {len(content_bytes)} bytes")
+            
+            # Si es un PDF directo (detectado por Content-Type o por contenido)
+            if (content_type.startswith("application/pdf") or 
+                is_pdf_content or 
+                (content_type.startswith("application/octet-stream") and is_pdf_content)):
                 logger.info("PDF directo detectado, guardando...")
                 filename = self._generate_filename_from_url(url, "pdf")
-                return self.save_pdf_from_binary(response.content, filename)
+                return self.save_pdf_from_binary(content_bytes, filename)
+            
+            # Si es XML (para facturas electrónicas)
+            elif (content_type.startswith("application/xml") or 
+                  content_type.startswith("text/xml") or
+                  is_xml_content or
+                  (content_type.startswith("application/octet-stream") and 
+                   url.lower().find('xml') > -1)):
+                logger.info("Archivo XML detectado, saltando (no es PDF)...")
+                return ""
             
             # Si es HTML (página de factura), buscar enlaces de descarga de PDF
             elif content_type.startswith("text/html"):
@@ -425,7 +451,7 @@ class EmailProcessor:
         except Exception as e:
             logger.error(f"Error al descargar PDF desde {url}: {str(e)}")
             return ""
-
+ 
     def _generate_filename_from_url(self, url: str, extension: str) -> str:
         """
         Genera un nombre de archivo único basado en la URL.
@@ -439,19 +465,85 @@ class EmailProcessor:
         """
         timestamp = int(time.time())
         
-        # Intentar extraer información útil de la URL
-        if "facte.siga.com.py" in url:
-            # Extraer RUC y CDC si están en la URL de SIGA
-            import re
-            ruc_match = re.search(r'ruc=([^&]+)', url)
-            cdc_match = re.search(r'cdc=([^&]+)', url)
-            
-            if ruc_match and cdc_match:
-                ruc = ruc_match.group(1)
-                cdc = cdc_match.group(1)[:10]  # Primeros 10 caracteres del CDC
-                return f"factura_siga_{ruc}_{cdc}_{timestamp}.{extension}"
+        # Análisis dinámico de cualquier URL
+        import re
+        from urllib.parse import urlparse, parse_qs
         
-        return f"factura_{timestamp}.{extension}"
+        try:
+            # Parsear la URL para extraer parámetros
+            parsed_url = urlparse(url)
+            query_params = parse_qs(parsed_url.query)
+            
+            # Buscar parámetros comunes de facturas de forma dinámica
+            ruc = None
+            cdc = None
+            numero_factura = None
+            
+            # Buscar información útil en parámetros de query
+            for param_name, values in query_params.items():
+                param_lower = param_name.lower()
+                if values and values[0]:  # Asegurar que hay valor
+                    if 'ruc' in param_lower:
+                        ruc = values[0]
+                    elif any(keyword in param_lower for keyword in ['cdc', 'codigo', 'code', 'document', 'doc']):
+                        cdc = values[0][:12]  # Limitar longitud
+                    elif any(keyword in param_lower for keyword in ['factura', 'invoice', 'numero', 'number', 'num']):
+                        numero_factura = values[0][:10]  # Limitar longitud
+            
+            # También buscar en la URL completa con regex (backup)
+            if not ruc:
+                ruc_match = re.search(r'ruc[=:]([^&\s]+)', url, re.IGNORECASE)
+                if ruc_match:
+                    ruc = ruc_match.group(1)
+            
+            if not cdc:
+                cdc_match = re.search(r'(?:cdc|codigo|code|document)[=:]([^&\s]+)', url, re.IGNORECASE)
+                if cdc_match:
+                    cdc = cdc_match.group(1)[:12]
+            
+            # Construir nombre basado en información disponible
+            parts = []
+            
+            if ruc:
+                # Limpiar RUC de caracteres especiales
+                ruc_clean = re.sub(r'[^\w\-]', '', ruc)
+                parts.append(f"ruc_{ruc_clean}")
+            
+            if cdc:
+                # Limpiar CDC de caracteres especiales
+                cdc_clean = re.sub(r'[^\w\-]', '', cdc)
+                parts.append(f"cdc_{cdc_clean}")
+            
+            if numero_factura:
+                # Limpiar número de factura
+                num_clean = re.sub(r'[^\w\-]', '', numero_factura)
+                parts.append(f"num_{num_clean}")
+            
+            # Si tenemos información útil, usarla
+            if parts:
+                identifier = "_".join(parts)
+                return f"factura_{identifier}_{timestamp}.{extension}"
+            
+        except Exception as e:
+            logger.warning(f"Error al parsear URL para nombre de archivo: {str(e)}")
+        
+        # Fallback universal: usar dominio + hash de la URL
+        try:
+            parsed_url = urlparse(url)
+            domain = parsed_url.netloc.replace('.', '_').replace(':', '_')
+            # Usar solo los primeros caracteres del dominio para mantener nombre corto
+            domain = domain[:20] if domain else "unknown"
+            # Limpiar caracteres especiales del dominio
+            domain = re.sub(r'[^\w\-_]', '', domain)
+        except:
+            domain = "unknown"
+        
+        # Crear hash corto de la URL para garantizar unicidad
+        import hashlib
+        url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
+        
+        # Fallback: nombre con dominio y hash
+        return f"factura_{domain}_{url_hash}_{timestamp}.{extension}"
 
     def _extract_pdf_from_html_page(self, html_content: str, base_url: str, headers: dict) -> str:
         """
@@ -474,8 +566,9 @@ class EmailProcessor:
             
             # Buscar enlaces de descarga de PDF en la página
             pdf_keywords = [
-                'descargar', 'pdf', 'imprimir', 'download', 'print',
-                'generar pdf', 'exportar pdf', 'ver pdf'
+                'descargar', 'pdf', 'imprimir', 'download', 'print','VISUALIZAR DOCUMENTO','visualizar documento',
+                'ver factura', 'descargar factura', 'factura electronica','ver documento',
+                'factura electrónica', 'visualizar','generar pdf', 'exportar pdf', 'ver pdf'
             ]
             
             logger.info("Buscando enlaces de descarga PDF en la página HTML...")
