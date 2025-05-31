@@ -261,7 +261,7 @@ class EmailProcessor:
     
     def _extract_links_from_email(self, message) -> List[str]:
         """
-        Extrae enlaces de un mensaje de correo, especialmente buscando enlaces a PDFs.
+        Extrae enlaces de un mensaje de correo, buscando PDFs directos y facturas electrónicas.
         
         Args:
             message: Mensaje de correo electrónico.
@@ -271,8 +271,9 @@ class EmailProcessor:
         """
         links = []
         
-        # Patrón para buscar URLs que apunten a PDFs
+        # Patrones para buscar diferentes tipos de enlaces
         pdf_url_pattern = r'https?://[^\s<>"]+\.pdf'
+        siga_pattern = r'https?://facte\.siga\.com\.py/[^\s<>"]*'
         
         # Buscar en partes HTML y de texto
         for part in message.walk():
@@ -289,15 +290,53 @@ class EmailProcessor:
                     else:
                         content = content.decode('utf-8', errors='replace')
                     
-                    # Buscar enlaces a PDFs
+                    # Buscar enlaces a PDFs directos
                     pdf_links = re.findall(pdf_url_pattern, content)
                     links.extend(pdf_links)
+                    
+                    # Buscar enlaces de facturas electrónicas SIGA
+                    siga_links = re.findall(siga_pattern, content)
+                    links.extend(siga_links)
+                    
+                    # Si es contenido HTML, buscar enlaces adicionales usando BeautifulSoup
+                    if content_type == "text/html":
+                        try:
+                            from bs4 import BeautifulSoup
+                            soup = BeautifulSoup(content, 'html.parser')
+                            
+                            # Palabras clave para identificar enlaces de facturas
+                            factura_keywords = [
+                                'visualizar documento', 'ver factura', 'descargar factura', 
+                                'factura electronica', 'factura electrónica', 'visualizar',
+                                'descargar xml', 'ver documento'
+                            ]
+                            
+                            # Buscar enlaces <a> con texto relacionado a facturas
+                            for a_tag in soup.find_all('a', href=True):
+                                link_text = a_tag.get_text().lower().strip()
+                                href = a_tag['href']
+                                
+                                # Verificar si el texto del enlace contiene palabras clave de factura
+                                if any(keyword in link_text for keyword in factura_keywords):
+                                    # Asegurarse de que sea una URL completa
+                                    if href.startswith('http'):
+                                        links.append(href)
+                                        logger.info(f"Encontrado enlace de factura: {href} (texto: '{link_text}')")
+                                    
+                        except ImportError:
+                            logger.warning("BeautifulSoup no está disponible. Solo se buscarán patrones de texto.")
+                        except Exception as e:
+                            logger.warning(f"Error al procesar HTML con BeautifulSoup: {str(e)}")
                     
                 except Exception as e:
                     logger.warning(f"Error al extraer enlaces: {str(e)}")
         
         # Eliminar duplicados
-        return list(set(links))
+        unique_links = list(set(links))
+        if unique_links:
+            logger.info(f"Enlaces encontrados: {unique_links}")
+        
+        return unique_links
     
     def save_pdf_from_binary(self, content: bytes, filename: str) -> str:
         """
@@ -335,41 +374,165 @@ class EmailProcessor:
     
     def download_pdf_from_url(self, url: str) -> str:
         """
-        Descarga un PDF desde una URL.
+        Descarga un PDF desde una URL, manejando tanto PDFs directos como sistemas de facturación.
         
         Args:
-            url: URL del PDF.
+            url: URL del PDF o página de factura.
             
         Returns:
             str: Ruta al archivo descargado o cadena vacía en caso de error.
         """
         try:
             import requests
+            from urllib.parse import urlparse
+            
+            logger.info(f"Intentando descargar desde: {url}")
+            
+            # Headers para simular un navegador real
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'es-ES,es;q=0.8,en-US;q=0.5,en;q=0.3',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+            }
             
             # Realizar la solicitud HTTP
-            response = requests.get(url, timeout=30)
+            response = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
             
-            # Verificar que la respuesta sea exitosa
             if response.status_code != 200:
-                logger.error(f"Error al descargar PDF desde {url}: Código {response.status_code}")
+                logger.error(f"Error al acceder a {url}: Código {response.status_code}")
                 return ""
             
-            # Verificar que el contenido sea un PDF
             content_type = response.headers.get("Content-Type", "").lower()
-            if not content_type.startswith("application/pdf"):
-                logger.warning(f"El contenido descargado de {url} no parece ser un PDF: {content_type}")
+            logger.info(f"Tipo de contenido recibido: {content_type}")
             
-            # Extraer nombre de archivo de la URL o de los encabezados
-            filename = url.split("/")[-1]
-            content_disposition = response.headers.get("Content-Disposition", "")
-            if "filename=" in content_disposition:
-                filename = re.findall('filename="?([^"]+)"?', content_disposition)[0]
+            # Si es un PDF directo
+            if content_type.startswith("application/pdf"):
+                logger.info("PDF directo detectado, guardando...")
+                filename = self._generate_filename_from_url(url, "pdf")
+                return self.save_pdf_from_binary(response.content, filename)
             
-            # Guardar el PDF
-            return self.save_pdf_from_binary(response.content, filename)
+            # Si es HTML (página de factura), buscar enlaces de descarga de PDF
+            elif content_type.startswith("text/html"):
+                logger.info("Página HTML detectada, buscando enlaces de descarga PDF...")
+                return self._extract_pdf_from_html_page(response.text, url, headers)
+            
+            else:
+                logger.warning(f"Tipo de contenido no soportado: {content_type}")
+                return ""
             
         except Exception as e:
             logger.error(f"Error al descargar PDF desde {url}: {str(e)}")
+            return ""
+
+    def _generate_filename_from_url(self, url: str, extension: str) -> str:
+        """
+        Genera un nombre de archivo único basado en la URL.
+        
+        Args:
+            url: URL del archivo.
+            extension: Extensión del archivo.
+            
+        Returns:
+            str: Nombre de archivo único.
+        """
+        timestamp = int(time.time())
+        
+        # Intentar extraer información útil de la URL
+        if "facte.siga.com.py" in url:
+            # Extraer RUC y CDC si están en la URL de SIGA
+            import re
+            ruc_match = re.search(r'ruc=([^&]+)', url)
+            cdc_match = re.search(r'cdc=([^&]+)', url)
+            
+            if ruc_match and cdc_match:
+                ruc = ruc_match.group(1)
+                cdc = cdc_match.group(1)[:10]  # Primeros 10 caracteres del CDC
+                return f"factura_siga_{ruc}_{cdc}_{timestamp}.{extension}"
+        
+        return f"factura_{timestamp}.{extension}"
+
+    def _extract_pdf_from_html_page(self, html_content: str, base_url: str, headers: dict) -> str:
+        """
+        Extrae PDF de una página HTML de factura electrónica.
+        
+        Args:
+            html_content: Contenido HTML de la página.
+            base_url: URL base para resolver enlaces relativos.
+            headers: Headers HTTP para las solicitudes.
+            
+        Returns:
+            str: Ruta al PDF descargado o cadena vacía si no se encuentra.
+        """
+        try:
+            from bs4 import BeautifulSoup
+            from urllib.parse import urljoin
+            import requests
+            
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Buscar enlaces de descarga de PDF en la página
+            pdf_keywords = [
+                'descargar', 'pdf', 'imprimir', 'download', 'print',
+                'generar pdf', 'exportar pdf', 'ver pdf'
+            ]
+            
+            logger.info("Buscando enlaces de descarga PDF en la página HTML...")
+            
+            # Buscar enlaces <a> con texto o atributos que indiquen descarga de PDF
+            for a_tag in soup.find_all('a', href=True):
+                href = a_tag['href']
+                link_text = a_tag.get_text().lower().strip()
+                
+                # Verificar si el enlace contiene palabras clave de PDF
+                is_pdf_link = (
+                    any(keyword in link_text for keyword in pdf_keywords) or
+                    href.lower().endswith('.pdf') or
+                    'pdf' in href.lower()
+                )
+                
+                if is_pdf_link:
+                    full_url = urljoin(base_url, href)
+                    logger.info(f"Encontrado posible enlace PDF: {full_url} (texto: '{link_text}')")
+                    
+                    # Intentar descargar este enlace como PDF
+                    try:
+                        pdf_response = requests.get(full_url, headers=headers, timeout=30, allow_redirects=True)
+                        
+                        if pdf_response.status_code == 200:
+                            response_content_type = pdf_response.headers.get("Content-Type", "").lower()
+                            
+                            if response_content_type.startswith("application/pdf"):
+                                logger.info(f"PDF encontrado y descargado desde: {full_url}")
+                                filename = self._generate_filename_from_url(full_url, "pdf")
+                                return self.save_pdf_from_binary(pdf_response.content, filename)
+                            else:
+                                logger.debug(f"El enlace no devolvió un PDF: {response_content_type}")
+                        else:
+                            logger.debug(f"Error al acceder al enlace: {pdf_response.status_code}")
+                            
+                    except Exception as e:
+                        logger.debug(f"Error al intentar descargar desde {full_url}: {str(e)}")
+                        continue
+            
+            # Si no encontramos enlaces específicos, buscar formularios o scripts que puedan generar PDFs
+            logger.info("No se encontraron enlaces directos, buscando formularios...")
+            
+            for form in soup.find_all('form'):
+                action = form.get('action', '')
+                if 'pdf' in action.lower() or 'print' in action.lower():
+                    logger.info(f"Encontrado formulario que puede generar PDF: {action}")
+                    # Aquí podrías implementar lógica para enviar el formulario si es necesario
+            
+            logger.warning(f"No se encontró enlace de descarga PDF en la página: {base_url}")
+            return ""
+            
+        except ImportError:
+            logger.error("BeautifulSoup no está disponible. No se puede procesar páginas HTML.")
+            return ""
+        except Exception as e:
+            logger.error(f"Error al extraer PDF de página HTML: {str(e)}")
             return ""
     
     def mark_as_read(self, email_id: str) -> bool:
@@ -458,17 +621,25 @@ class EmailProcessor:
                                     "source": "attachment"
                                 })
                     
-                    # 2. Procesar enlaces a PDFs
+                    # 2. Procesar enlaces a PDFs y facturas electrónicas
                     if "links" in metadata and metadata["links"]:
+                        logger.info(f"Procesando {len(metadata['links'])} enlaces encontrados")
+                        
                         for link in metadata["links"]:
-                            if link.lower().endswith(".pdf"):
-                                pdf_path = self.download_pdf_from_url(link)
-                                
-                                if pdf_path:
-                                    processed_pdfs.append({
-                                        "path": pdf_path,
-                                        "source": "link"
-                                    })
+                            logger.info(f"Intentando procesar enlace: {link}")
+                            
+                            # Intentar descargar desde cualquier enlace (no solo los que terminan en .pdf)
+                            pdf_path = self.download_pdf_from_url(link)
+                            
+                            if pdf_path:
+                                logger.info(f"PDF descargado exitosamente desde: {link}")
+                                processed_pdfs.append({
+                                    "path": pdf_path,
+                                    "source": "link",
+                                    "original_url": link
+                                })
+                            else:
+                                logger.warning(f"No se pudo descargar PDF desde: {link}")
                     
                     # Procesar cada PDF encontrado con OpenAI
                     for pdf_info in processed_pdfs:
