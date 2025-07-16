@@ -17,13 +17,14 @@ class ExcelExporter:
         Inicializa el exportador a Excel.
         
         Args:
-            output_path: Ruta del archivo Excel de salida. Si no se proporciona,
-                       se utiliza el valor de configuración.
+            output_path: Ruta del archivo Excel de salida.
         """
-        self.output_path = output_path or settings.EXCEL_OUTPUT_PATH
-        
+        env_path = output_path or settings.EXCEL_OUTPUT_PATH or "/app/data/facturas.xlsx"
+        self.output_path = os.path.abspath(env_path)
+
         # Crear directorio si no existe
         os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
+        logger.info(f"ExcelExporter apuntando a: {self.output_path}")
     
     def export_invoices(self, invoices: List[InvoiceData]) -> str:
         """

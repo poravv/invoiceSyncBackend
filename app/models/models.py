@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime
+from app.utils.date_utils import try_parse_date
 
 class ProductoFactura(BaseModel):
     """Modelo para los productos/servicios en la factura."""
@@ -10,26 +11,23 @@ class ProductoFactura(BaseModel):
     total: float = 0
 
 class EmpresaData(BaseModel):
-    """Datos de la empresa emisora."""
-    nombre: str = ""
-    ruc: str = ""
-    direccion: str = ""
-    telefono: str = ""
-    actividad_economica: str = ""
+    nombre: Optional[str] = ""
+    ruc: Optional[str] = ""
+    direccion: Optional[str] = ""
+    telefono: Optional[str] = ""
+    actividad_economica: Optional[str] = ""
 
 class TimbradoData(BaseModel):
-    """Datos del timbrado."""
-    nro: str = ""
-    fecha_inicio_vigencia: str = ""
-    valido_hasta: str = ""
+    nro: Optional[str] = ""
+    fecha_inicio_vigencia: Optional[str] = ""
+    valido_hasta: Optional[str] = ""
 
 class FacturaData(BaseModel):
-    """Datos específicos de la factura."""
-    contado_nro: str = ""
-    fecha: str = ""
-    caja_nro: str = ""
-    cdc: str = ""
-    condicion_venta: str = ""
+    contado_nro: Optional[str] = ""
+    fecha: Optional[str] = ""
+    caja_nro: Optional[str] = ""
+    cdc: Optional[str] = ""
+    condicion_venta: Optional[str] = ""
 
 class TotalesData(BaseModel):
     """Totales de la factura."""
@@ -45,10 +43,9 @@ class ClienteData(BaseModel):
     """Datos del cliente."""
     nombre: str = ""
     ruc: str = ""
-    email: str = ""
+    email: Optional[str] = ""
 
 class InvoiceData(BaseModel):
-    """Modelo completo para los datos extraídos de una factura."""
     fecha: Optional[datetime] = None
     ruc_emisor: Optional[str] = None
     nombre_emisor: Optional[str] = None
@@ -58,8 +55,7 @@ class InvoiceData(BaseModel):
     pdf_path: Optional[str] = None
     email_origen: Optional[str] = None
     procesado_en: datetime = Field(default_factory=datetime.now)
-    
-    # Campos adicionales para facturas paraguayas
+
     timbrado: Optional[str] = None
     cdc: Optional[str] = None
     ruc_cliente: Optional[str] = None
@@ -71,15 +67,46 @@ class InvoiceData(BaseModel):
     subtotal_5: float = Field(default=0.0)
     subtotal_10: float = Field(default=0.0)
     actividad_economica: Optional[str] = None
-    
-    # Nuevos campos para datos estructurados
+
     empresa: Optional[EmpresaData] = None
     timbrado_data: Optional[TimbradoData] = None
     factura_data: Optional[FacturaData] = None
     productos: List[ProductoFactura] = Field(default_factory=list)
     totales: Optional[TotalesData] = None
     cliente: Optional[ClienteData] = None
-    
+
+    @classmethod
+    def from_dict(cls, data: dict, email_metadata: dict = None):
+        try:
+            return cls(
+                fecha=try_parse_date(data.get("fecha")),
+                ruc_emisor=data.get("ruc_emisor"),
+                nombre_emisor=data.get("nombre_emisor"),
+                numero_factura=data.get("numero_factura"),
+                monto_total=data.get("monto_total", 0),
+                iva=data.get("iva", 0),
+                timbrado=data.get("timbrado"),
+                cdc=data.get("cdc"),
+                ruc_cliente=data.get("ruc_cliente"),
+                nombre_cliente=data.get("nombre_cliente"),
+                email_cliente=data.get("email_cliente"),
+                condicion_venta=data.get("condicion_venta"),
+                moneda=data.get("moneda", "PYG"),
+                subtotal_exentas=data.get("subtotal_exentas", 0),
+                subtotal_5=data.get("subtotal_5", 0),
+                subtotal_10=data.get("subtotal_10", 0),
+                actividad_economica=data.get("actividad_economica"),
+                empresa=EmpresaData(**data["empresa"]) if data.get("empresa") else None,
+                timbrado_data=TimbradoData(**data["timbrado_data"]) if data.get("timbrado_data") else None,
+                factura_data=FacturaData(**data["factura_data"]) if data.get("factura_data") else None,
+                productos=[ProductoFactura(**p) for p in data.get("productos", [])],
+                totales=TotalesData(**data["totales"]) if data.get("totales") else None,
+                cliente=ClienteData(**data["cliente"]) if data.get("cliente") else None,
+                email_origen=email_metadata.get("sender") if email_metadata else None,
+            )
+        except Exception as e:
+            print(f"[InvoiceData.from_dict] Error: {e}")
+            return None
     class Config:
         schema_extra = {
             "example": {

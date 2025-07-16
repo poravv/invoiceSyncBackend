@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     EMAIL_USE_SSL: bool = os.getenv("EMAIL_USE_SSL", "True").lower() == "true"
     
     # Configuraciones de la App
-    EXCEL_OUTPUT_PATH: str = os.getenv("EXCEL_OUTPUT_PATH", "./data/facturas.xlsx")
+    EXCEL_OUTPUT_PATH: str = os.getenv("EXCEL_OUTPUT_PATH", "/app/data/facturas.xlsx")
     TEMP_PDF_DIR: str = os.getenv("TEMP_PDF_DIR", "./data/temp_pdfs")
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     

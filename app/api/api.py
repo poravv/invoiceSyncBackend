@@ -7,6 +7,8 @@ import uvicorn
 from typing import List, Optional
 import shutil
 from datetime import datetime
+from fastapi.responses import FileResponse
+from fastapi import Response
 
 from app.config.settings import settings
 from app.models.models import InvoiceData, EmailConfig, ProcessResult, JobStatus
@@ -159,20 +161,25 @@ async def upload_pdf(
 async def get_excel():
     """
     Descarga el archivo Excel con las facturas procesadas.
-    
-    Returns:
-        FileResponse: Archivo Excel para descargar.
     """
     excel_path = settings.EXCEL_OUTPUT_PATH
-    
+
     if not os.path.exists(excel_path):
         raise HTTPException(status_code=404, detail="Archivo Excel no encontrado")
-    
-    return FileResponse(
+
+    response = FileResponse(
         path=excel_path,
         filename="facturas.xlsx",
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
+    # Agregar headers para evitar caché
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+
+    return response
+
 
 @app.get("/status")
 async def get_status():

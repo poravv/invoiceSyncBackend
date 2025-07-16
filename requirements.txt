@@ -17,3 +17,5 @@ PyMuPDF==1.23.8
 Pillow==10.0.0
 beautifulsoup4==4.12.2
 typing-extensions>=4.8.0
+pdfminer.six==20221105
+PyPDF2==3.0.1
