@@ -94,26 +94,30 @@ class OpenAIProcessor:
             raise
 
     def _build_prompt(self) -> str:
-        return  """
-Analiza cuidadosamente esta factura y extrae TODOS los siguientes campos en formato JSON estructurado (es muy importante que devuelvas TODOS los campos, incluso si están vacíos):
+        return """
+Analiza cuidadosamente esta factura paraguaya y extrae TODOS los siguientes campos en formato JSON estructurado. Esta información será usada para el sistema contable ASCONT, así que es MUY IMPORTANTE que extraigas los importes correctamente según las tasas de IVA:
 
 {
   "fecha": "YYYY-MM-DD",
-  "ruc_emisor": "string",
-  "nombre_emisor": "string",
-  "numero_factura": "string",
-  "monto_total": number,
-  "iva": number,
+  "numero_factura": "XXX-XXX-XXXXXXX (formato completo)",
+  "ruc_emisor": "XXXXXXXX-X (con guión)",
+  "nombre_emisor": "Razón social del emisor",
+  "condicion_venta": "CONTADO o CREDITO",
+  
+  // IMPORTES CRÍTICOS - SEPARAR POR TASA DE IVA
+  "subtotal_exentas": number, // Monto gravado al 0% (exento de IVA)
+  "subtotal_5": number,       // Monto gravado al 5% (sin incluir el IVA)
+  "iva_5": number,           // IVA del 5% calculado
+  "subtotal_10": number,     // Monto gravado al 10% (sin incluir el IVA)
+  "iva_10": number,          // IVA del 10% calculado
+  "monto_total": number,     // Total final a pagar
+  
   "timbrado": "string",
   "cdc": "string",
   "ruc_cliente": "string",
   "nombre_cliente": "string",
   "email_cliente": "string",
-  "condicion_venta": "CONTADO o CREDITO",
-  "moneda": "string",
-  "subtotal_exentas": number,
-  "subtotal_5": number,
-  "subtotal_10": number,
+  "moneda": "PYG, USD, EUR, etc.",
   "actividad_economica": "string",
 
   "empresa": {
@@ -125,7 +129,7 @@ Analiza cuidadosamente esta factura y extrae TODOS los siguientes campos en form
   },
   "timbrado_data": {
     "nro": "string",
-    "fecha_inicio_vigencia": "YYYY-MM-DD" puede llamarse inicio de vigencia o vigencia,
+    "fecha_inicio_vigencia": "YYYY-MM-DD",
     "valido_hasta": "YYYY-MM-DD"
   },
   "factura_data": {
@@ -137,7 +141,7 @@ Analiza cuidadosamente esta factura y extrae TODOS los siguientes campos en form
   },
   "productos": [
     {
-      "articulo": "string",
+      "articulo": "Descripción del producto/servicio",
       "cantidad": number,
       "precio_unitario": number,
       "total": number
@@ -159,13 +163,27 @@ Analiza cuidadosamente esta factura y extrae TODOS los siguientes campos en form
   }
 }
 
-⚠️ REGLAS IMPORTANTES:
-- TODOS los campos son obligatorios. Si no encuentras el valor, devuelve null (texto) o 0 (números).
-- Los montos deben ser SOLO números, sin símbolos ni separadores de miles.
-- Las fechas deben estar en formato YYYY-MM-DD.
-- La respuesta debe ser un JSON válido, sin errores de formato.
-- NO uses markdown ni encierres la respuesta en bloques ```json.
-- NO incluyas explicaciones ni comentarios, solo el objeto JSON limpio.
+⚠️ REGLAS CRÍTICAS PARA ASCONT:
+1. **SEPARACIÓN DE IVA**: Es MUY IMPORTANTE separar correctamente los importes según la tasa de IVA:
+   - subtotal_exentas: Solo el monto base sin IVA (tasa 0%)
+   - subtotal_5: Solo el monto base antes del IVA (tasa 5%)
+   - iva_5: Solo el IVA del 5% (subtotal_5 * 0.05)
+   - subtotal_10: Solo el monto base antes del IVA (tasa 10%)
+   - iva_10: Solo el IVA del 10% (subtotal_10 * 0.10)
+
+2. **CÁLCULOS**:
+   - Si ves "Gravado 10%: 1,000,000" significa subtotal_10 = 1000000, iva_10 = 100000
+   - Si ves "IVA 10%: 100,000" úsalo directamente como iva_10
+   - monto_total = subtotal_exentas + subtotal_5 + iva_5 + subtotal_10 + iva_10
+
+3. **FORMATO**:
+   - Todos los montos deben ser números sin separadores de miles ni símbolos
+   - RUC debe incluir el guión (ej: "80014066-4")
+   - Fechas en formato YYYY-MM-DD
+   - Si no encuentras un valor, usa null (texto) o 0 (números)
+
+4. **NO uses markdown ni ```json en la respuesta**
+5. **Responde SOLO con el objeto JSON válido**
 """
 
 def extract_clean_json(text: str) -> dict:

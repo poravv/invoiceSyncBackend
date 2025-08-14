@@ -11,30 +11,201 @@ import re
 from datetime import datetime
 
 from app.config.settings import settings
-from app.models.models import EmailConfig, InvoiceData, ProcessResult
+from app.models.models import EmailConfig, MultiEmailConfig, InvoiceData, ProcessResult
 from app.modules.openai_processor.openai_processor import OpenAIProcessor
 from app.modules.excel_exporter.excel_exporter import ExcelExporter
 
 logger = logging.getLogger(__name__)
 
+class MultiEmailProcessor:
+    def __init__(self, email_configs: List[MultiEmailConfig] = None):
+        """
+        Inicializa el procesador de múltiples correos.
+        
+        Args:
+            email_configs: Lista de configuraciones de correo. Si no se proporciona,
+                         se utilizan los valores de las variables de entorno.
+        """
+        if email_configs is None:
+            # Cargar configuraciones desde settings
+            configs_data = settings.get_all_email_configs()
+            self.email_configs = [MultiEmailConfig(**config) for config in configs_data if config.get('enabled', True)]
+        else:
+            self.email_configs = email_configs
+        
+        self.openai_processor = OpenAIProcessor()
+        self.excel_exporter = ExcelExporter()
+        
+        # Crear directorios necesarios
+        os.makedirs(settings.TEMP_PDF_DIR, exist_ok=True)
+        os.makedirs(settings.EXCEL_OUTPUT_DIR, exist_ok=True)
+        
+        # Control para job programado
+        self._job_running = False
+        self._job_thread = None
+        
+        logger.info(f"MultiEmailProcessor inicializado con {len(self.email_configs)} cuentas de correo")
+    
+    def process_all_emails(self) -> ProcessResult:
+        """
+        Procesa correos de todas las cuentas configuradas.
+        
+        Returns:
+            ProcessResult: Resultado consolidado del procesamiento.
+        """
+        all_invoices = []
+        success_count = 0
+        error_messages = []
+        excel_files = []
+        
+        logger.info(f"Iniciando procesamiento de {len(self.email_configs)} cuentas de correo")
+        
+        for i, email_config in enumerate(self.email_configs):
+            logger.info(f"Procesando cuenta {i+1}/{len(self.email_configs)}: {email_config.username}")
+            
+            try:
+                # Crear procesador individual para esta cuenta
+                single_processor = EmailProcessor(EmailConfig(
+                    host=email_config.host,
+                    port=email_config.port,
+                    username=email_config.username,
+                    password=email_config.password,
+                    search_criteria=email_config.search_criteria,
+                    search_terms=email_config.search_terms if email_config.search_terms else settings.EMAIL_SEARCH_TERMS
+                ))
+                
+                # Procesar correos de esta cuenta
+                result = single_processor.process_emails()
+                
+                if result.success:
+                    success_count += 1
+                    all_invoices.extend(result.invoices)
+                    logger.info(f"Cuenta {email_config.username}: {result.invoice_count} facturas procesadas")
+                else:
+                    error_messages.append(f"Error en {email_config.username}: {result.message}")
+                    logger.error(f"Error en cuenta {email_config.username}: {result.message}")
+                
+            except Exception as e:
+                error_messages.append(f"Error en {email_config.username}: {str(e)}")
+                logger.error(f"Error al procesar cuenta {email_config.username}: {str(e)}")
+        
+        # Exportar todas las facturas a Excel
+        if all_invoices:
+            excel_path = self.excel_exporter.export_invoices(all_invoices)
+            if excel_path:
+                excel_files.append(excel_path)
+        
+        # Crear mensaje de resultado
+        if success_count == len(self.email_configs):
+            message = f"Procesamiento exitoso de {len(self.email_configs)} cuentas. {len(all_invoices)} facturas encontradas."
+        elif success_count > 0:
+            message = f"Procesamiento parcial: {success_count}/{len(self.email_configs)} cuentas exitosas. {len(all_invoices)} facturas encontradas."
+        else:
+            message = f"Fallo en todas las cuentas. Errores: {'; '.join(error_messages)}"
+        
+        if excel_files:
+            message += f" Archivos Excel generados: {len(excel_files)}"
+        
+        return ProcessResult(
+            success=success_count > 0,
+            message=message,
+            invoice_count=len(all_invoices),
+            invoices=all_invoices,
+            excel_files=excel_files
+        )
+    
+    def start_scheduled_job(self):
+        """
+        Inicia el trabajo programado para ejecutarse periódicamente.
+        """
+        if self._job_running:
+            logger.warning("El job ya está en ejecución")
+            return
+        
+        interval_minutes = settings.JOB_INTERVAL_MINUTES
+        logger.info(f"Iniciando job programado para ejecutarse cada {interval_minutes} minutos")
+        
+        # Programar la tarea
+        schedule.every(interval_minutes).minutes.do(self._run_job)
+        
+        # Iniciar el thread para el scheduler
+        self._job_running = True
+        self._job_thread = threading.Thread(target=self._schedule_loop)
+        self._job_thread.daemon = True
+        self._job_thread.start()
+    
+    def stop_scheduled_job(self):
+        """
+        Detiene el trabajo programado.
+        """
+        if not self._job_running:
+            logger.warning("El job no está en ejecución")
+            return
+        
+        logger.info("Deteniendo job programado")
+        self._job_running = False
+        
+        # Esperar a que el thread termine
+        if self._job_thread and self._job_thread.is_alive():
+            self._job_thread.join(timeout=2)
+        
+        # Limpiar todas las tareas programadas
+        schedule.clear()
+    
+    def _schedule_loop(self):
+        """
+        Bucle para ejecutar las tareas programadas.
+        """
+        while self._job_running:
+            schedule.run_pending()
+            time.sleep(1)
+    
+    def _run_job(self):
+        """
+        Ejecuta el trabajo programado.
+        """
+        logger.info("Ejecutando job programado para procesar múltiples correos")
+        result = self.process_all_emails()
+        
+        if result.success:
+            logger.info(result.message)
+        else:
+            logger.error(result.message)
+        
+        return result
+
 class EmailProcessor:
     def __init__(self, config: EmailConfig = None):
         """
-        Inicializa el procesador de correos.
+        Inicializa el procesador de correos para una sola cuenta.
         
         Args:
             config: Configuración para la conexión al correo. Si no se proporciona,
-                  se utilizan los valores de las variables de entorno.
+                  se utiliza la primera configuración disponible.
         """
         if config is None:
-            self.config = EmailConfig(
-                host=settings.EMAIL_HOST,
-                port=settings.EMAIL_PORT,
-                username=settings.EMAIL_USERNAME,
-                password=settings.EMAIL_PASSWORD,
-                search_criteria=settings.EMAIL_SEARCH_CRITERIA,
-                search_terms=settings.EMAIL_SEARCH_TERMS
-            )
+            # Usar la primera configuración disponible como fallback
+            configs_data = settings.get_all_email_configs()
+            if configs_data:
+                first_config = configs_data[0]
+                self.config = EmailConfig(
+                    host=first_config['host'],
+                    port=first_config['port'],
+                    username=first_config['username'],
+                    password=first_config['password'],
+                    search_criteria=first_config.get('search_criteria', 'UNSEEN'),
+                    search_terms=first_config.get('search_terms', settings.EMAIL_SEARCH_TERMS)
+                )
+            else:
+                # Fallback a configuración legacy
+                self.config = EmailConfig(
+                    host=settings.EMAIL_HOST,
+                    port=settings.EMAIL_PORT,
+                    username=settings.EMAIL_USERNAME,
+                    password=settings.EMAIL_PASSWORD,
+                    search_criteria=settings.EMAIL_SEARCH_CRITERIA,
+                    search_terms=settings.EMAIL_SEARCH_TERMS
+                )
         else:
             self.config = config
         
@@ -44,7 +215,7 @@ class EmailProcessor:
         
         # Crear directorios necesarios
         os.makedirs(settings.TEMP_PDF_DIR, exist_ok=True)
-        os.makedirs(os.path.dirname(settings.EXCEL_OUTPUT_PATH), exist_ok=True)
+        os.makedirs(settings.EXCEL_OUTPUT_DIR, exist_ok=True)
         
         # Control para job programado
         self._job_running = False
@@ -662,7 +833,8 @@ class EmailProcessor:
             success=True,
             message="Procesamiento completado",
             invoice_count=0,
-            invoices=[]
+            invoices=[],
+            excel_files=[]
         )
         
         try:
@@ -748,9 +920,10 @@ class EmailProcessor:
                         # Extraer datos con OpenAI
                         invoice_data = self.openai_processor.extract_invoice_data(pdf_path, email_meta_for_ai)
                         
-                        # Agregar a la lista de facturas procesadas
-                        result.invoices.append(invoice_data)
-                        result.invoice_count += 1
+                        if invoice_data:
+                            # Agregar a la lista de facturas procesadas
+                            result.invoices.append(invoice_data)
+                            result.invoice_count += 1
                     
                     # Marcar correo como leído
                     self.mark_as_read(email_id)
@@ -763,6 +936,7 @@ class EmailProcessor:
             if result.invoices:
                 excel_path = self.excel_exporter.export_invoices(result.invoices)
                 if excel_path:
+                    result.excel_files = [excel_path]
                     result.message = f"Se procesaron {result.invoice_count} facturas. Archivo Excel: {excel_path}"
                 else:
                     result.message = f"Se procesaron {result.invoice_count} facturas, pero hubo un error al exportar a Excel"

@@ -6,137 +6,180 @@ from datetime import datetime
 import openpyxl
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 
-from app.models.models import InvoiceData
+from app.models.models import InvoiceData, ExcelFileInfo
 from app.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-class ExcelExporter:
-    def __init__(self, output_path: str = None):
+class ExcelExporterASCONT:
+    def __init__(self, output_dir: str = None):
         """
-        Inicializa el exportador a Excel.
+        Inicializa el exportador a Excel para formato ASCONT.
         
         Args:
-            output_path: Ruta del archivo Excel de salida.
+            output_dir: Directorio base donde se guardarán los archivos Excel mensuales.
         """
-        env_path = output_path or settings.EXCEL_OUTPUT_PATH or "/app/data/facturas.xlsx"
-        self.output_path = os.path.abspath(env_path)
-
+        self.output_dir = output_dir or settings.EXCEL_OUTPUT_DIR or "/app/data/excels"
+        
         # Crear directorio si no existe
-        os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
-        logger.info(f"ExcelExporter apuntando a: {self.output_path}")
+        os.makedirs(self.output_dir, exist_ok=True)
+        logger.info(f"ExcelExporterASCONT apuntando a: {self.output_dir}")
+    
+    def get_monthly_excel_path(self, year_month: str) -> str:
+        """
+        Obtiene la ruta del archivo Excel para un mes específico.
+        
+        Args:
+            year_month: Mes en formato YYYY-MM
+            
+        Returns:
+            str: Ruta completa del archivo Excel
+        """
+        filename = f"facturas_ascont_{year_month}.xlsx"
+        return os.path.join(self.output_dir, filename)
     
     def export_invoices(self, invoices: List[InvoiceData]) -> str:
         """
-        Exporta facturas a un archivo Excel con todos los campos necesarios.
+        Exporta facturas a archivos Excel separados por mes en formato ASCONT.
         
         Args:
             invoices: Lista de objetos InvoiceData para exportar.
             
         Returns:
-            str: Ruta del archivo Excel generado.
+            str: Ruta del último archivo Excel generado.
         """
         if not invoices:
             logger.warning("No hay facturas para exportar")
             return ""
         
         try:
-            # Convertir a lista de diccionarios para pandas
-            data = []
-            productos_data = []  # Para la hoja de productos
+            # Agrupar facturas por mes
+            invoices_by_month = self._group_invoices_by_month(invoices)
             
-            for i, invoice in enumerate(invoices):
-                # Convertir fecha a str para mejor visualización
+            last_excel_path = ""
+            
+            for year_month, month_invoices in invoices_by_month.items():
+                logger.info(f"Procesando {len(month_invoices)} facturas para {year_month}")
+                
+                # Obtener ruta del archivo Excel para este mes
+                excel_path = self.get_monthly_excel_path(year_month)
+                
+                # Exportar facturas de este mes
+                success = self._export_monthly_excel(month_invoices, excel_path, year_month)
+                
+                if success:
+                    last_excel_path = excel_path
+                    logger.info(f"Archivo Excel generado: {excel_path}")
+                else:
+                    logger.error(f"Error al generar Excel para {year_month}")
+            
+            return last_excel_path
+            
+        except Exception as e:
+            logger.error(f"Error al exportar a Excel: {str(e)}", exc_info=True)
+            return ""
+    
+    def _group_invoices_by_month(self, invoices: List[InvoiceData]) -> Dict[str, List[InvoiceData]]:
+        """
+        Agrupa las facturas por mes.
+        
+        Args:
+            invoices: Lista de facturas
+            
+        Returns:
+            Dict: Diccionario con facturas agrupadas por mes (YYYY-MM)
+        """
+        grouped = {}
+        
+        for invoice in invoices:
+            # Obtener mes de la factura
+            if hasattr(invoice, 'mes_proceso') and invoice.mes_proceso:
+                month_key = invoice.mes_proceso
+            elif invoice.fecha:
+                month_key = invoice.fecha.strftime("%Y-%m")
+            else:
+                # Usar mes actual como fallback
+                month_key = datetime.now().strftime("%Y-%m")
+            
+            if month_key not in grouped:
+                grouped[month_key] = []
+            
+            grouped[month_key].append(invoice)
+        
+        return grouped
+    
+    def _export_monthly_excel(self, invoices: List[InvoiceData], excel_path: str, year_month: str) -> bool:
+        """
+        Exporta facturas de un mes específico a Excel en formato ASCONT.
+        
+        Args:
+            invoices: Lista de facturas del mes
+            excel_path: Ruta del archivo Excel
+            year_month: Mes en formato YYYY-MM
+            
+        Returns:
+            bool: True si se exportó correctamente
+        """
+        try:
+            # Convertir a formato ASCONT
+            ascont_data = []
+            productos_data = []
+            
+            for invoice in invoices:
+                # Convertir fecha a string para mejor visualización
                 fecha_str = invoice.fecha.strftime("%d/%m/%Y") if invoice.fecha else ""
-                procesado_str = invoice.procesado_en.strftime("%d/%m/%Y %H:%M:%S") if invoice.procesado_en else ""
                 
-                # Extraer información de empresa, si está disponible
-                empresa_nombre = ""
-                empresa_direccion = ""
-                empresa_telefono = ""
-                
-                if invoice.empresa:
-                    if isinstance(invoice.empresa, dict):
-                        empresa_nombre = invoice.empresa.get('nombre', '')
-                        empresa_direccion = invoice.empresa.get('direccion', '')
-                        empresa_telefono = invoice.empresa.get('telefono', '')
-                    else:
-                        empresa_nombre = invoice.empresa.nombre if hasattr(invoice.empresa, 'nombre') else ""
-                        empresa_direccion = invoice.empresa.direccion if hasattr(invoice.empresa, 'direccion') else ""
-                        empresa_telefono = invoice.empresa.telefono if hasattr(invoice.empresa, 'telefono') else ""
-                
-                # Extraer información del timbrado
-                timbrado_inicio = ""
-                timbrado_fin = ""
-                
-                if invoice.timbrado_data:
-                    if isinstance(invoice.timbrado_data, dict):
-                        timbrado_inicio = invoice.timbrado_data.get('fecha_inicio_vigencia', '')
-                        timbrado_fin = invoice.timbrado_data.get('valido_hasta', '')
-                    else:
-                        timbrado_inicio = invoice.timbrado_data.fecha_inicio_vigencia if hasattr(invoice.timbrado_data, 'fecha_inicio_vigencia') else ""
-                        timbrado_fin = invoice.timbrado_data.valido_hasta if hasattr(invoice.timbrado_data, 'valido_hasta') else ""
-                
-                # Información de totales
-                total_iva = 0
-                subtotal = 0
-                
-                if invoice.totales:
-                    if isinstance(invoice.totales, dict):
-                        total_iva = float(invoice.totales.get('total_iva', 0))
-                        subtotal = float(invoice.totales.get('subtotal', 0))
-                    else:
-                        total_iva = float(invoice.totales.total_iva) if hasattr(invoice.totales, 'total_iva') else 0
-                        subtotal = float(invoice.totales.subtotal) if hasattr(invoice.totales, 'subtotal') else 0
-                
-                # Datos principales para la hoja principal
-                data.append({
+                # Mapear al formato ASCONT
+                ascont_record = {
                     "Fecha": fecha_str,
-                    "RUC Emisor": invoice.ruc_emisor or "",
-                    "Nombre Emisor": invoice.nombre_emisor or empresa_nombre,
-                    "Dirección Emisor": empresa_direccion,
-                    "Teléfono Emisor": empresa_telefono,
-                    "Nro. Factura": invoice.numero_factura or "",
-                    "Condición Venta": invoice.condicion_venta or "",
-                    "Moneda": invoice.moneda or "PYG",
-                    "Monto Total": float(invoice.monto_total) if invoice.monto_total else 0.0,
-                    "Subtotal": subtotal,
-                    "IVA": float(invoice.iva) if invoice.iva else total_iva,
-                    "Subtotal Exentas": float(invoice.subtotal_exentas) if invoice.subtotal_exentas else 0.0,
-                    "Subtotal 5%": float(invoice.subtotal_5) if invoice.subtotal_5 else 0.0,
-                    "Subtotal 10%": float(invoice.subtotal_10) if invoice.subtotal_10 else 0.0,
-                    "RUC Cliente": invoice.ruc_cliente or "",
-                    "Nombre Cliente": invoice.nombre_cliente or "",
-                    "Email Cliente": invoice.email_cliente or "",
+                    "Tipo Documento": getattr(invoice, 'tipo_documento', 'FC'),
+                    "Número Documento": getattr(invoice, 'numero_documento', invoice.numero_factura or ""),
+                    "RUC Proveedor": getattr(invoice, 'ruc_proveedor', invoice.ruc_emisor or ""),
+                    "Razón Social Proveedor": getattr(invoice, 'razon_social_proveedor', invoice.nombre_emisor or ""),
+                    "Condición Compra": getattr(invoice, 'condicion_compra', invoice.condicion_venta or "CONTADO"),
+                    
+                    # Importes en formato ASCONT
+                    "Gravado 10%": float(getattr(invoice, 'gravado_10', invoice.subtotal_10 or 0)),
+                    "IVA 10%": float(getattr(invoice, 'iva_10', 0)),
+                    "Gravado 5%": float(getattr(invoice, 'gravado_5', invoice.subtotal_5 or 0)),
+                    "IVA 5%": float(getattr(invoice, 'iva_5', 0)),
+                    "Exento": float(getattr(invoice, 'exento', invoice.subtotal_exentas or 0)),
+                    "Total Factura": float(getattr(invoice, 'total_factura', invoice.monto_total or 0)),
+                    
+                    # Campos adicionales
                     "Timbrado": invoice.timbrado or "",
-                    "Timbrado Inicio": timbrado_inicio,
-                    "Timbrado Fin": timbrado_fin,
                     "CDC": invoice.cdc or "",
-                    "Actividad Económica": invoice.actividad_economica or "",
-                    "Productos": len(invoice.productos) if invoice.productos else 0,
-                    "PDF": invoice.pdf_path or "",
-                    "Origen (correo)": invoice.email_origen or "",
-                    "Procesado en": procesado_str
-                })
+                    "Moneda": invoice.moneda or "PYG",
+                    "Email Origen": invoice.email_origen or "",
+                    "Procesado En": invoice.procesado_en.strftime("%d/%m/%Y %H:%M:%S") if invoice.procesado_en else ""
+                }
                 
-                # Añadir datos de productos
+                # Calcular IVAs si no están presentes
+                if ascont_record["IVA 10%"] == 0 and ascont_record["Gravado 10%"] > 0:
+                    ascont_record["IVA 10%"] = round(ascont_record["Gravado 10%"] * 0.10, 2)
+                
+                if ascont_record["IVA 5%"] == 0 and ascont_record["Gravado 5%"] > 0:
+                    ascont_record["IVA 5%"] = round(ascont_record["Gravado 5%"] * 0.05, 2)
+                
+                ascont_data.append(ascont_record)
+                
+                # Productos para hoja separada
                 if invoice.productos:
                     for producto in invoice.productos:
-                        # Manejar productos tanto como objetos ProductoFactura como diccionarios
                         if isinstance(producto, dict):
                             articulo = producto.get('articulo', '')
                             cantidad = float(producto.get('cantidad', 0))
                             precio_unitario = float(producto.get('precio_unitario', 0))
                             total = float(producto.get('total', 0))
                         else:
-                            articulo = producto.articulo if hasattr(producto, 'articulo') else ""
-                            cantidad = float(producto.cantidad) if hasattr(producto, 'cantidad') else 0
-                            precio_unitario = float(producto.precio_unitario) if hasattr(producto, 'precio_unitario') else 0
-                            total = float(producto.total) if hasattr(producto, 'total') else 0
+                            articulo = getattr(producto, 'articulo', '')
+                            cantidad = float(getattr(producto, 'cantidad', 0))
+                            precio_unitario = float(getattr(producto, 'precio_unitario', 0))
+                            total = float(getattr(producto, 'total', 0))
                         
                         productos_data.append({
-                            "Factura": invoice.numero_factura or "",
-                            "RUC Emisor": invoice.ruc_emisor or "",
+                            "Número Documento": ascont_record["Número Documento"],
+                            "RUC Proveedor": ascont_record["RUC Proveedor"],
                             "Fecha": fecha_str,
                             "Artículo": articulo,
                             "Cantidad": cantidad,
@@ -144,93 +187,114 @@ class ExcelExporter:
                             "Total": total
                         })
             
-            # Columnas numéricas para formateo especial
-            numeric_cols = ["Monto Total", "Subtotal", "IVA", "Subtotal Exentas", "Subtotal 5%", "Subtotal 10%", "Productos"]
-            productos_numeric_cols = ["Cantidad", "Precio Unitario", "Total"]
-            
-            # Crear o cargar el archivo Excel existente
-            if os.path.exists(self.output_path):
+            # Cargar datos existentes si el archivo ya existe
+            if os.path.exists(excel_path):
                 try:
-                    existing_df = pd.read_excel(self.output_path, sheet_name="Facturas")
-                    new_df = pd.DataFrame(data)
+                    existing_df = pd.read_excel(excel_path, sheet_name="Facturas ASCONT")
+                    new_df = pd.DataFrame(ascont_data)
                     
-                    # Convertir columnas numéricas a float para evitar problemas
-                    for col in numeric_cols:
-                        if col in existing_df.columns and col in new_df.columns:
-                            existing_df[col] = existing_df[col].astype(float)
-                            new_df[col] = new_df[col].astype(float)
-                    
-                    # Concatenar y eliminar duplicados
+                    # Combinar y eliminar duplicados
                     combined_df = pd.concat([existing_df, new_df], ignore_index=True)
                     combined_df.drop_duplicates(
-                        subset=["RUC Emisor", "Nro. Factura", "Monto Total", "CDC"],
+                        subset=["RUC Proveedor", "Número Documento", "Total Factura", "CDC"],
                         keep="last",
                         inplace=True
                     )
                     
-                    # Cargar datos de productos existentes
+                    # Cargar productos existentes
                     try:
-                        existing_productos_df = pd.read_excel(self.output_path, sheet_name="Productos")
+                        existing_productos_df = pd.read_excel(excel_path, sheet_name="Productos")
                         productos_df = pd.DataFrame(productos_data)
-                        
-                        # Convertir columnas numéricas de productos a float
-                        for col in productos_numeric_cols:
-                            if col in existing_productos_df.columns and col in productos_df.columns:
-                                existing_productos_df[col] = existing_productos_df[col].astype(float)
-                                productos_df[col] = productos_df[col].astype(float)
-                        
-                        # Combinar productos
                         combined_productos_df = pd.concat([existing_productos_df, productos_df], ignore_index=True)
                         combined_productos_df.drop_duplicates(
-                            subset=["Factura", "RUC Emisor", "Artículo"],
+                            subset=["Número Documento", "RUC Proveedor", "Artículo"],
                             keep="last",
                             inplace=True
                         )
-                    except Exception as e:
-                        logger.warning(f"No se encontró hoja de productos existente: {str(e)}")
+                    except:
                         combined_productos_df = pd.DataFrame(productos_data)
                     
-                    # Guardar el DataFrame combinado en múltiples hojas
-                    with pd.ExcelWriter(self.output_path, engine='openpyxl') as writer:
-                        combined_df.to_excel(writer, sheet_name="Facturas", index=False)
-                        combined_productos_df.to_excel(writer, sheet_name="Productos", index=False)
-                    
                 except Exception as e:
-                    logger.error(f"Error al cargar archivo Excel existente: {str(e)}")
-                    # Si hay error al cargar, creamos uno nuevo
-                    with pd.ExcelWriter(self.output_path, engine='openpyxl') as writer:
-                        pd.DataFrame(data).to_excel(writer, sheet_name="Facturas", index=False)
-                        pd.DataFrame(productos_data).to_excel(writer, sheet_name="Productos", index=False)
+                    logger.warning(f"Error al cargar archivo existente: {str(e)}")
+                    combined_df = pd.DataFrame(ascont_data)
+                    combined_productos_df = pd.DataFrame(productos_data)
             else:
-                # Crear nuevo archivo con múltiples hojas
-                with pd.ExcelWriter(self.output_path, engine='openpyxl') as writer:
-                    pd.DataFrame(data).to_excel(writer, sheet_name="Facturas", index=False)
-                    pd.DataFrame(productos_data).to_excel(writer, sheet_name="Productos", index=False)
+                combined_df = pd.DataFrame(ascont_data)
+                combined_productos_df = pd.DataFrame(productos_data)
+            
+            # Escribir a Excel con múltiples hojas
+            with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+                combined_df.to_excel(writer, sheet_name="Facturas ASCONT", index=False)
+                combined_productos_df.to_excel(writer, sheet_name="Productos", index=False)
+                
+                # Crear hoja de resumen
+                self._create_summary_sheet(writer, combined_df, year_month)
             
             # Aplicar formato
-            self._apply_excel_formatting(numeric_cols, productos_numeric_cols)
+            self._apply_ascont_formatting(excel_path)
             
-            logger.info(f"Archivo Excel generado: {self.output_path} con {len(data)} facturas")
-            return self.output_path
+            logger.info(f"Archivo Excel ASCONT generado: {excel_path} con {len(combined_df)} facturas")
+            return True
             
         except Exception as e:
-            logger.error(f"Error al exportar a Excel: {str(e)}", exc_info=True)
-            return ""
+            logger.error(f"Error al exportar Excel mensual: {str(e)}", exc_info=True)
+            return False
     
-    def _apply_excel_formatting(self, numeric_cols: List[str], productos_numeric_cols: List[str]):
+    def _create_summary_sheet(self, writer, df: pd.DataFrame, year_month: str):
         """
-        Aplica formato al archivo Excel para mejorar su visualización.
+        Crea una hoja de resumen con totales del mes.
         
         Args:
-            numeric_cols: Lista de columnas numéricas para formateo especial en la hoja principal.
-            productos_numeric_cols: Lista de columnas numéricas para formateo especial en la hoja de productos.
+            writer: ExcelWriter objeto
+            df: DataFrame con los datos
+            year_month: Mes en formato YYYY-MM
         """
         try:
-            wb = openpyxl.load_workbook(self.output_path)
+            # Calcular totales
+            total_facturas = len(df)
+            total_gravado_10 = df["Gravado 10%"].sum()
+            total_iva_10 = df["IVA 10%"].sum()
+            total_gravado_5 = df["Gravado 5%"].sum()
+            total_iva_5 = df["IVA 5%"].sum()
+            total_exento = df["Exento"].sum()
+            total_general = df["Total Factura"].sum()
+            
+            # Crear datos del resumen
+            resumen_data = [
+                ["RESUMEN MENSUAL", ""],
+                ["Período", year_month],
+                ["", ""],
+                ["Total Facturas", total_facturas],
+                ["", ""],
+                ["IMPORTES", ""],
+                ["Gravado 10%", total_gravado_10],
+                ["IVA 10%", total_iva_10],
+                ["Gravado 5%", total_gravado_5],
+                ["IVA 5%", total_iva_5],
+                ["Exento", total_exento],
+                ["", ""],
+                ["TOTAL GENERAL", total_general]
+            ]
+            
+            resumen_df = pd.DataFrame(resumen_data, columns=["Concepto", "Valor"])
+            resumen_df.to_excel(writer, sheet_name="Resumen", index=False)
+            
+        except Exception as e:
+            logger.error(f"Error al crear hoja de resumen: {str(e)}")
+    
+    def _apply_ascont_formatting(self, excel_path: str):
+        """
+        Aplica formato específico para ASCONT.
+        
+        Args:
+            excel_path: Ruta del archivo Excel
+        """
+        try:
+            wb = openpyxl.load_workbook(excel_path)
             
             # Definir estilos
-            header_font = Font(bold=True, size=12, color="FFFFFF")
-            header_fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
+            header_font = Font(bold=True, size=11, color="FFFFFF")
+            header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
             header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             
             thin_border = Border(
@@ -240,12 +304,9 @@ class ExcelExporter:
                 bottom=Side(style="thin")
             )
             
-            # Formatear cada hoja
-            for sheet_name in wb.sheetnames:
-                ws = wb[sheet_name]
-                
-                # Determinar qué columnas numéricas usar según la hoja
-                sheet_numeric_cols = numeric_cols if sheet_name == "Facturas" else productos_numeric_cols
+            # Formatear hoja de Facturas ASCONT
+            if "Facturas ASCONT" in wb.sheetnames:
+                ws = wb["Facturas ASCONT"]
                 
                 # Aplicar formato a encabezados
                 for cell in ws[1]:
@@ -254,7 +315,7 @@ class ExcelExporter:
                     cell.alignment = header_alignment
                     cell.border = thin_border
                 
-                # Aplicar formato a celdas
+                # Aplicar formato a datos
                 for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
                     for cell in row:
                         cell.border = thin_border
@@ -262,38 +323,131 @@ class ExcelExporter:
                         
                         # Formato para columnas numéricas
                         header_value = ws.cell(1, cell.column).value
-                        if header_value in sheet_numeric_cols:
+                        if header_value and any(word in header_value for word in ["Gravado", "IVA", "Total", "Exento"]):
                             cell.number_format = "#,##0.00"
                 
-                # Auto-ajustar anchos de columna
+                # Auto-ajustar anchos
                 for column in ws.columns:
-                    max_length = max(
-                        len(str(cell.value)) for cell in column
-                    ) if any(cell.value for cell in column) else 0
-                    
+                    max_length = max(len(str(cell.value)) for cell in column if cell.value)
                     if max_length > 0:
                         column_letter = column[0].column_letter
                         adjusted_width = min(max_length + 2, 50)
                         ws.column_dimensions[column_letter].width = adjusted_width
                 
-                # Congelar paneles (fila de encabezados)
                 ws.freeze_panes = "A2"
             
-            # Guardar cambios
-            wb.save(self.output_path)
-            logger.info("Formato aplicado al archivo Excel")
+            # Formatear hoja de Resumen
+            if "Resumen" in wb.sheetnames:
+                ws = wb["Resumen"]
+                
+                # Formato especial para la hoja de resumen
+                for row in ws.iter_rows():
+                    for cell in row:
+                        if cell.row == 1 or "RESUMEN" in str(cell.value) or "TOTAL GENERAL" in str(cell.value):
+                            cell.font = Font(bold=True, size=12)
+                        elif "IMPORTES" in str(cell.value):
+                            cell.font = Font(bold=True, size=11)
+                        
+                        if isinstance(cell.value, (int, float)) and cell.value != 0:
+                            cell.number_format = "#,##0.00"
+            
+            wb.save(excel_path)
+            logger.info("Formato ASCONT aplicado al archivo Excel")
             
         except Exception as e:
-            logger.error(f"Error al aplicar formato Excel: {str(e)}", exc_info=True)
+            logger.error(f"Error al aplicar formato ASCONT: {str(e)}")
     
-    def append_invoices(self, invoices: List[InvoiceData]) -> bool:
+    def get_available_excel_files(self) -> List[ExcelFileInfo]:
         """
-        Añade facturas al archivo Excel existente.
+        Obtiene la lista de archivos Excel disponibles.
+        
+        Returns:
+            List[ExcelFileInfo]: Lista de archivos Excel disponibles
+        """
+        excel_files = []
+        
+        try:
+            if not os.path.exists(self.output_dir):
+                return excel_files
+            
+            for filename in os.listdir(self.output_dir):
+                if filename.endswith('.xlsx') and filename.startswith('facturas_ascont_'):
+                    file_path = os.path.join(self.output_dir, filename)
+                    
+                    # Extraer mes del nombre del archivo
+                    year_month = filename.replace('facturas_ascont_', '').replace('.xlsx', '')
+                    
+                    # Crear nombre para mostrar
+                    display_name = self._format_display_name(year_month)
+                    
+                    # Obtener información del archivo
+                    file_stats = os.stat(file_path)
+                    
+                    # Contar facturas en el archivo
+                    invoice_count = 0
+                    try:
+                        df = pd.read_excel(file_path, sheet_name="Facturas ASCONT")
+                        invoice_count = len(df)
+                    except:
+                        invoice_count = 0
+                    
+                    excel_files.append(ExcelFileInfo(
+                        filename=filename,
+                        year_month=year_month,
+                        display_name=display_name,
+                        path=file_path,
+                        size=file_stats.st_size,
+                        last_modified=datetime.fromtimestamp(file_stats.st_mtime),
+                        invoice_count=invoice_count
+                    ))
+            
+            # Ordenar por mes (más reciente primero)
+            excel_files.sort(key=lambda x: x.year_month, reverse=True)
+            
+        except Exception as e:
+            logger.error(f"Error al obtener archivos Excel: {str(e)}")
+        
+        return excel_files
+    
+    def _format_display_name(self, year_month: str) -> str:
+        """
+        Convierte YYYY-MM a formato amigable como 'Enero 2025'.
         
         Args:
-            invoices: Lista de objetos InvoiceData para añadir.
+            year_month: Mes en formato YYYY-MM
             
         Returns:
-            bool: True si se añadieron correctamente, False en caso contrario.
+            str: Nombre formateado para mostrar
         """
-        return bool(self.export_invoices(invoices))
+        try:
+            year, month = year_month.split('-')
+            month_names = [
+                'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+                'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
+            ]
+            month_index = int(month) - 1
+            return f"{month_names[month_index]} {year}"
+        except:
+            return year_month
+    
+    def get_excel_by_month(self, year_month: str) -> Optional[str]:
+        """
+        Obtiene la ruta del archivo Excel para un mes específico.
+        
+        Args:
+            year_month: Mes en formato YYYY-MM
+            
+        Returns:
+            Optional[str]: Ruta del archivo si existe, None si no existe
+        """
+        excel_path = self.get_monthly_excel_path(year_month)
+        
+        if os.path.exists(excel_path):
+            return excel_path
+        
+        return None
+
+# Mantener clase original para compatibilidad hacia atrás
+class ExcelExporter(ExcelExporterASCONT):
+    """Clase de compatibilidad hacia atrás."""
+    pass

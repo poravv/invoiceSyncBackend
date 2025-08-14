@@ -7,7 +7,7 @@ from datetime import datetime
 
 from app.config.settings import settings
 from app.models.models import InvoiceData, ProcessResult, EmailConfig, JobStatus
-from app.modules.email_processor.email_processor import EmailProcessor
+from app.modules.email_processor.email_processor import MultiEmailProcessor, EmailProcessor
 from app.modules.openai_processor.openai_processor import OpenAIProcessor
 from app.modules.excel_exporter.excel_exporter import ExcelExporter
 
@@ -28,10 +28,18 @@ class InvoiceSync:
         """Inicializa el sistema de sincronización de facturas usando OpenAI."""
         # Crear directorios necesarios
         os.makedirs(settings.TEMP_PDF_DIR, exist_ok=True)
-        os.makedirs(os.path.dirname(settings.EXCEL_OUTPUT_PATH), exist_ok=True)
+        os.makedirs(settings.EXCEL_OUTPUT_DIR, exist_ok=True)
         
         # Inicializar componentes
-        self.email_processor = EmailProcessor()
+        # Usar MultiEmailProcessor si hay múltiples configuraciones de correo
+        email_configs = settings.get_all_email_configs()
+        if len(email_configs) > 1:
+            self.email_processor = MultiEmailProcessor()
+            logger.info(f"Usando MultiEmailProcessor con {len(email_configs)} cuentas de correo")
+        else:
+            self.email_processor = EmailProcessor()
+            logger.info("Usando EmailProcessor para una sola cuenta de correo")
+        
         self.openai_processor = OpenAIProcessor()
         self.excel_exporter = ExcelExporter()
         
@@ -58,8 +66,13 @@ class InvoiceSync:
         # Registrar inicio del procesamiento
         self._job_status.last_run = datetime.now().isoformat()
         
-        # Procesar correos
-        result = self.email_processor.process_emails()
+        # Procesar correos (puede ser una o múltiples cuentas)
+        if hasattr(self.email_processor, 'process_all_emails'):
+            # Es MultiEmailProcessor
+            result = self.email_processor.process_all_emails()
+        else:
+            # Es EmailProcessor tradicional
+            result = self.email_processor.process_emails()
         
         # Actualizar estado del job
         self._job_status.last_result = result

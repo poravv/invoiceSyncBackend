@@ -1,4 +1,4 @@
-from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import os
@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi import Response
 
 from app.config.settings import settings
-from app.models.models import InvoiceData, EmailConfig, ProcessResult, JobStatus
+from app.models.models import InvoiceData, EmailConfig, ProcessResult, JobStatus, ExcelFileInfo, ExcelFileList, MultiEmailConfig
 from app.main import InvoiceSync
 
 # Configurar logging
@@ -132,22 +132,28 @@ async def upload_pdf(
         invoice_data = invoice_sync.process_pdf(pdf_path, email_meta)
         
         # Exportar a Excel
-        invoices = [invoice_data]
+        invoices = [invoice_data] if invoice_data else []
         excel_path = invoice_sync.excel_exporter.export_invoices(invoices)
+        
+        excel_files = []
+        if excel_path:
+            excel_files = [excel_path]
         
         if not excel_path:
             return ProcessResult(
                 success=False,
                 message="Error al exportar a Excel",
                 invoice_count=0,
-                invoices=invoices
+                invoices=invoices,
+                excel_files=[]
             )
         
         return ProcessResult(
             success=True,
             message=f"Factura procesada correctamente. Excel: {excel_path}",
             invoice_count=1,
-            invoices=invoices
+            invoices=invoices,
+            excel_files=excel_files
         )
         
     except Exception as e:
@@ -160,25 +166,139 @@ async def upload_pdf(
 @app.get("/excel")
 async def get_excel():
     """
-    Descarga el archivo Excel con las facturas procesadas.
+    Descarga el archivo Excel más reciente (última fecha modificación).
     """
-    excel_path = settings.EXCEL_OUTPUT_PATH
+    try:
+        # Obtener lista de archivos Excel disponibles
+        excel_files = invoice_sync.excel_exporter.get_available_excel_files()
+        
+        if not excel_files:
+            raise HTTPException(status_code=404, detail="No se encontraron archivos Excel")
+        
+        # Ordenar por fecha de modificación (más reciente primero)
+        excel_files.sort(key=lambda x: x.last_modified, reverse=True)
+        latest_file = excel_files[0]
+        
+        if not os.path.exists(latest_file.path):
+            raise HTTPException(status_code=404, detail="Archivo Excel no encontrado")
+        
+        response = FileResponse(
+            path=latest_file.path,
+            filename=latest_file.filename,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        
+        # Agregar headers para evitar caché
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error al obtener archivo Excel: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al obtener archivo Excel: {str(e)}")
 
-    if not os.path.exists(excel_path):
-        raise HTTPException(status_code=404, detail="Archivo Excel no encontrado")
+@app.get("/excel/list", response_model=ExcelFileList)
+async def list_excel_files():
+    """
+    Obtiene la lista de archivos Excel disponibles por mes.
+    
+    Returns:
+        ExcelFileList: Lista de archivos Excel disponibles con metadatos
+    """
+    try:
+        excel_files = invoice_sync.excel_exporter.get_available_excel_files()
+        return ExcelFileList(
+            files=excel_files,
+            total_count=len(excel_files)
+        )
+    except Exception as e:
+        logger.error(f"Error al listar archivos Excel: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al listar archivos Excel: {str(e)}")
 
-    response = FileResponse(
-        path=excel_path,
-        filename="facturas.xlsx",
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+@app.get("/excel/{year_month}")
+async def get_excel_by_month(year_month: str):
+    """
+    Descarga el archivo Excel de un mes específico.
+    
+    Args:
+        year_month: Mes en formato YYYY-MM
+    """
+    try:
+        # Validar formato del mes
+        try:
+            datetime.strptime(year_month, "%Y-%m")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Formato de mes incorrecto. Use YYYY-MM")
+        
+        # Obtener ruta del archivo Excel para ese mes
+        excel_path = invoice_sync.excel_exporter.get_excel_by_month(year_month)
+        
+        if not excel_path:
+            raise HTTPException(status_code=404, detail=f"Archivo Excel no encontrado para {year_month}")
+        
+        filename = f"facturas_ascont_{year_month}.xlsx"
+        
+        response = FileResponse(
+            path=excel_path,
+            filename=filename,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        
+        # Agregar headers para evitar caché
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error al obtener archivo Excel de {year_month}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al obtener archivo Excel: {str(e)}")
 
-    # Agregar headers para evitar caché
-    response.headers["Cache-Control"] = "no-store"
-    response.headers["Pragma"] = "no-cache"
-    response.headers["Expires"] = "0"
-
-    return response
+@app.post("/email-config/test")
+async def test_email_config(config: MultiEmailConfig):
+    """
+    Prueba la conexión a una configuración de correo.
+    
+    Args:
+        config: Configuración de correo a probar
+        
+    Returns:
+        dict: Resultado de la prueba
+    """
+    try:
+        from app.modules.email_processor.email_processor import EmailProcessor
+        from app.models.models import EmailConfig
+        
+        # Crear configuración temporal para probar
+        test_config = EmailConfig(
+            host=config.host,
+            port=config.port,
+            username=config.username,
+            password=config.password,
+            search_criteria=config.search_criteria,
+            search_terms=config.search_terms
+        )
+        
+        # Crear procesador temporal
+        processor = EmailProcessor(test_config)
+        
+        # Intentar conectar
+        success = processor.connect()
+        processor.disconnect()
+        
+        if success:
+            return {"success": True, "message": "Conexión exitosa"}
+        else:
+            return {"success": False, "message": "Error al conectar"}
+            
+    except Exception as e:
+        logger.error(f"Error al probar configuración de correo: {str(e)}")
+        return {"success": False, "message": f"Error: {str(e)}"}
 
 
 @app.get("/status")
@@ -189,25 +309,45 @@ async def get_status():
     Returns:
         dict: Estado del sistema.
     """
-    excel_path = settings.EXCEL_OUTPUT_PATH
-    job_status = invoice_sync.get_job_status()
-    
-    status_info = {
-        "status": "active",
-        "excel_exists": os.path.exists(excel_path),
-        "last_modified": datetime.fromtimestamp(os.path.getmtime(excel_path)) if os.path.exists(excel_path) else None,
-        "temp_dir": settings.TEMP_PDF_DIR,
-        "email_configured": bool(settings.EMAIL_USERNAME and settings.EMAIL_PASSWORD),
-        "openai_configured": bool(settings.OPENAI_API_KEY),
-        "job": {
-            "running": job_status.running,
-            "interval_minutes": job_status.interval_minutes,
-            "next_run": job_status.next_run,
-            "last_run": job_status.last_run
+    try:
+        # Obtener archivos Excel disponibles
+        excel_files = invoice_sync.excel_exporter.get_available_excel_files()
+        excel_exists = len(excel_files) > 0
+        last_modified = excel_files[0].last_modified if excel_files else None
+        
+        # Estado del job
+        job_status = invoice_sync.get_job_status()
+        
+        # Configuraciones de correo
+        email_configs = settings.get_all_email_configs()
+        
+        status_info = {
+            "status": "active",
+            "excel_files_count": len(excel_files),
+            "excel_exists": excel_exists,
+            "last_modified": last_modified,
+            "temp_dir": settings.TEMP_PDF_DIR,
+            "excel_output_dir": settings.EXCEL_OUTPUT_DIR,
+            "email_configs_count": len(email_configs),
+            "email_configured": len(email_configs) > 0 and all(
+                config.get('username') and config.get('password') 
+                for config in email_configs
+            ),
+            "openai_configured": bool(settings.OPENAI_API_KEY),
+            "job": {
+                "running": job_status.running,
+                "interval_minutes": job_status.interval_minutes,
+                "next_run": job_status.next_run,
+                "last_run": job_status.last_run
+            },
+            "excel_files": excel_files
         }
-    }
-    
-    return status_info
+        
+        return status_info
+        
+    except Exception as e:
+        logger.error(f"Error al obtener estado: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al obtener estado: {str(e)}")
 
 @app.post("/job/start", response_model=JobStatus)
 async def start_job():
