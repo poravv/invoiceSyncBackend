@@ -457,7 +457,8 @@ class ExcelExporterASCONT:
         Returns:
             str: Tipo de documento ('FC', 'CR', etc.)
         """
-        condicion = getattr(invoice, 'condicion_venta', '').upper()
+        condicion = getattr(invoice, 'condicion_venta', '') or ''
+        condicion = condicion.upper() if condicion else ''
         
         if 'CONTADO' in condicion:
             return 'FC'  # Factura Contado
