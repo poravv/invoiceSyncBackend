@@ -630,6 +630,8 @@ Debes responder SOLO con un objeto JSON que contenga TODOS los campos listados a
             }
             
             invoice = InvoiceData.from_dict(basic_data, email_metadata)
+            # Agregar pdf_path como atributo temporal para poder extraer texto real
+            setattr(invoice, 'pdf_path', pdf_path)
             logger.info(f"Factura básica creada: {numero_factura} - CDC: {cdc}")
             return invoice
             
@@ -840,7 +842,26 @@ Analiza cuidadosamente esta factura paraguaya y extrae TODOS los siguientes camp
                 # Actualizar la factura con información del CDC
                 invoice.ruc_emisor = ruc_completo
                 invoice.fecha = datetime.strptime(fecha_cdc, "%Y-%m-%d").date()
-                invoice.nombre_emisor = f"EMISOR RUC {ruc_completo} - VERIFICAR DATOS MANUALMENTE"
+                
+                # Intentar extraer nombre real del PDF en lugar de inventar
+                nombre_real = self._extract_real_company_name_from_pdf(invoice.pdf_path if hasattr(invoice, 'pdf_path') else None, ruc_completo)
+                invoice.nombre_emisor = nombre_real
+                
+                # Intentar extraer número de factura del filename si no está presente
+                if not invoice.numero_documento or invoice.numero_documento == "":
+                    # Buscar patrón XXX-XXX-XXXXXXX en cualquier parte del filename
+                    import os
+                    filename = os.path.basename(invoice.cdc) if hasattr(invoice, 'cdc') else ""
+                    # Buscar en diferentes posibles fuentes
+                    search_sources = [filename, cdc]
+                    
+                    for source in search_sources:
+                        if source:
+                            factura_match = re.search(r'(\d{3}-\d{3}-\d{7})', source)
+                            if factura_match:
+                                invoice.numero_documento = factura_match.group(1)
+                                logger.info(f"🔧 Número de factura extraído: {invoice.numero_documento}")
+                                break
                 
                 logger.info(f"🔧 DESPUÉS - RUC: {invoice.ruc_emisor}, Nombre: {invoice.nombre_emisor}")
                 logger.info(f"✅ Factura básica mejorada con CDC: RUC {ruc_completo}, Fecha {fecha_cdc}")
@@ -854,18 +875,175 @@ Analiza cuidadosamente esta factura paraguaya y extrae TODOS los siguientes camp
             logger.error(f"❌ Traceback completo:", exc_info=True)
             return invoice
 
+    def _extract_real_company_name_from_pdf(self, pdf_path: str, ruc: str) -> str:
+        """
+        Extrae el nombre real de la empresa del PDF, buscando patrones como S.A., S.R.L., etc.
+        NO inventa nombres - extrae texto real del documento.
+        
+        Args:
+            pdf_path: Ruta al PDF (puede ser None)
+            ruc: RUC de la empresa
+            
+        Returns:
+            str: Nombre real extraído o indicación de revisión manual
+        """
+        try:
+            if not pdf_path or not os.path.exists(pdf_path):
+                logger.warning(f"PDF no disponible para extraer nombre real")
+                return f"RUC {ruc} - REVISAR NOMBRE MANUALMENTE"
+            
+            # Extraer texto completo del PDF
+            try:
+                from pdfminer.high_level import extract_text
+                text_content = extract_text(pdf_path).strip()
+            except Exception as e:
+                logger.error(f"Error extrayendo texto del PDF: {e}")
+                text_content = None
+                
+            if not text_content:
+                logger.warning(f"No se pudo extraer texto del PDF para buscar nombre")
+                return f"RUC {ruc} - REVISAR NOMBRE MANUALMENTE"
+            
+            logger.info(f"🔍 Texto extraído del PDF: {len(text_content)} caracteres")
+            
+            # Buscar patrones de nombres empresariales paraguayos reales
+            company_patterns = [
+                # Patrones con sufijos empresariales
+                r'([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s,.-]+?)(?:\s+S\.A\.)',
+                r'([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s,.-]+?)(?:\s+S\.R\.L\.)',
+                r'([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s,.-]+?)(?:\s+S\.A\.E\.)',
+                r'([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s,.-]+?)(?:\s+LTDA)',
+                r'([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s,.-]+?)(?:\s+COOPERATIVA)',
+                r'([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s,.-]+?)(?:\s+SOCIEDAD ANONIMA)',
+                
+                # Patrones completos con sufijos
+                r'([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s,.-]+?S\.A\.)',
+                r'([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s,.-]+?S\.R\.L\.)',
+                r'([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s,.-]+?S\.A\.E\.)',
+                r'([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s,.-]+?LTDA)',
+                r'([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s,.-]+?COOPERATIVA)',
+            ]
+            
+            # Buscar nombres cerca del RUC
+            ruc_clean = ruc.replace('-', '')
+            
+            for pattern in company_patterns:
+                matches = re.finditer(pattern, text_content.upper(), re.IGNORECASE)
+                for match in matches:
+                    candidate_name = match.group(1).strip()
+                    
+                    # Filtrar nombres muy cortos o que parezcan otros datos
+                    if len(candidate_name) > 5 and not re.match(r'^\d+', candidate_name):
+                        # Verificar si está cerca del RUC en el texto
+                        start_pos = max(0, match.start() - 200)
+                        end_pos = min(len(text_content), match.end() + 200)
+                        context = text_content[start_pos:end_pos].upper()
+                        
+                        if ruc_clean in context or ruc in context:
+                            # Limpiar y formatear el nombre encontrado
+                            clean_name = re.sub(r'\s+', ' ', candidate_name).strip()
+                            logger.info(f"🏢 Nombre real encontrado en PDF: {clean_name}")
+                            return clean_name
+            
+            # Si no encontramos patrones específicos, buscar líneas que contengan el RUC
+            lines = text_content.split('\n')
+            for line in lines:
+                line_upper = line.upper().strip()
+                if (ruc_clean in line_upper or ruc in line_upper) and len(line_upper) > 10:
+                    # Buscar si la línea contiene sufijos empresariales
+                    if any(suffix in line_upper for suffix in ['S.A.', 'S.R.L.', 'LTDA', 'COOPERATIVA', 'S.A.E.']):
+                        # Extraer la parte que parece el nombre
+                        clean_line = re.sub(r'RUC:?\s*\d+-?\d', '', line_upper).strip()
+                        clean_line = re.sub(r'\s+', ' ', clean_line).strip()
+                        if len(clean_line) > 5:
+                            logger.info(f"🏢 Nombre encontrado en línea con RUC: {clean_line}")
+                            return clean_line
+            
+            logger.warning(f"No se pudo encontrar nombre empresarial real en el PDF")
+            return f"RUC {ruc} - REVISAR NOMBRE MANUALMENTE"
+            
+        except Exception as e:
+            logger.error(f"Error extrayendo nombre real del PDF: {e}")
+            return f"RUC {ruc} - REVISAR NOMBRE MANUALMENTE"
+            
+            return invoice
+            
+        except Exception as e:
+            logger.error(f"❌ Error al mejorar factura básica con CDC: {str(e)}")
+            logger.error(f"❌ Traceback completo:", exc_info=True)
+            return invoice
+
     def _extract_clean_json(self, text: str) -> dict:
         """
         Extrae y limpia un objeto JSON desde texto potencialmente envuelto en ```json ... ``` o ```
+        Normaliza campos problemáticos que pueden venir como listas o formatos incorrectos.
         
         Args:
             text: Texto que contiene el JSON
             
         Returns:
-            dict: Objeto JSON parseado
+            dict: Objeto JSON parseado y normalizado
         """
-        # Eliminar posibles bloques de markdown tipo ```json o ```
-        cleaned = re.sub(r"```json\s*", "", text.strip(), flags=re.IGNORECASE)
-        cleaned = re.sub(r"```", "", cleaned)
-        
-        return json.loads(cleaned)
+        try:
+            # Eliminar posibles bloques de markdown tipo ```json o ```
+            cleaned = re.sub(r"```json\s*", "", text.strip(), flags=re.IGNORECASE)
+            cleaned = re.sub(r"```", "", cleaned)
+            
+            # Parsear JSON
+            data = json.loads(cleaned)
+            
+            # Normalizar campos problemáticos
+            data = self._normalize_json_fields(data)
+            
+            return data
+            
+        except Exception as e:
+            logger.error(f"Error extrayendo y limpiando JSON: {e}")
+            raise
+    
+    def _normalize_json_fields(self, data: dict) -> dict:
+        """Normaliza campos problemáticos que pueden venir como listas o formatos incorrectos"""
+        try:
+            # Campos numéricos que pueden venir mal formateados
+            numeric_fields = [
+                'subtotal_exentas', 'subtotal_5', 'iva_5', 'subtotal_10', 
+                'iva_10', 'monto_total'
+            ]
+            
+            for field in numeric_fields:
+                if field in data:
+                    value = data[field]
+                    # Si es una lista, tomar el primer elemento
+                    if isinstance(value, list):
+                        logger.warning(f"🔧 Campo {field} vino como lista: {value}, tomando primer elemento")
+                        value = value[0] if value else 0
+                    # Convertir a número
+                    if isinstance(value, str):
+                        # Remover espacios y caracteres no numéricos excepto puntos y comas
+                        clean_value = re.sub(r'[^\d.,]', '', str(value))
+                        if clean_value:
+                            value = float(clean_value.replace(',', '.'))
+                        else:
+                            value = 0
+                    data[field] = float(value) if value is not None else 0.0
+            
+            # Limpiar CDC si viene con espacios
+            if 'cdc' in data and isinstance(data['cdc'], str):
+                data['cdc'] = re.sub(r'\s+', '', data['cdc'])
+            
+            # Normalizar número de factura (puede venir como lista)
+            if 'numero_factura' in data and isinstance(data['numero_factura'], list):
+                data['numero_factura'] = data['numero_factura'][0] if data['numero_factura'] else ""
+            
+            # Normalizar otros campos string que pueden venir como lista
+            string_fields = ['ruc_emisor', 'nombre_emisor', 'fecha', 'timbrado']
+            for field in string_fields:
+                if field in data and isinstance(data[field], list):
+                    logger.warning(f"🔧 Campo {field} vino como lista: {data[field]}, tomando primer elemento")
+                    data[field] = data[field][0] if data[field] else ""
+                    
+            return data
+            
+        except Exception as e:
+            logger.error(f"Error normalizando campos JSON: {e}")
+            return data
