@@ -56,10 +56,10 @@ def safe_float(value, default=0.0) -> float:
 
 class ProductoFactura(BaseModel):
     """Modelo para los productos/servicios en la factura."""
-    articulo: str = ""
-    cantidad: float = 0
-    precio_unitario: float = 0
-    total: float = 0
+    articulo: Optional[str] = ""
+    cantidad: Optional[float] = 0
+    precio_unitario: Optional[float] = 0
+    total: Optional[float] = 0
 
 class EmpresaData(BaseModel):
     nombre: Optional[str] = ""
@@ -82,62 +82,62 @@ class FacturaData(BaseModel):
 
 class TotalesData(BaseModel):
     """Totales de la factura."""
-    cantidad_articulos: int = 0
-    subtotal: float = 0
-    total_a_pagar: float = 0
-    iva_0: float = Field(0, alias="iva_0%")
-    iva_5: float = Field(0, alias="iva_5%")
-    iva_10: float = Field(0, alias="iva_10%")
-    total_iva: float = 0
+    cantidad_articulos: Optional[int] = 0
+    subtotal: Optional[float] = 0
+    total_a_pagar: Optional[float] = 0
+    iva_0: Optional[float] = Field(0, alias="iva_0%")
+    iva_5: Optional[float] = Field(0, alias="iva_5%")
+    iva_10: Optional[float] = Field(0, alias="iva_10%")
+    total_iva: Optional[float] = 0
 
 class ClienteData(BaseModel):
     """Datos del cliente."""
-    nombre: str = ""
-    ruc: str = ""
+    nombre: Optional[str] = ""
+    ruc: Optional[str] = ""
     email: Optional[str] = ""
 
 class InvoiceDataASCONT(BaseModel):
     """Modelo adaptado al formato ASCONT."""
-    # Campos básicos requeridos por ASCONT
+    # Campos básicos NO OBLIGATORIOS para evitar errores de validación
     fecha: Optional[datetime] = None
-    tipo_documento: str = Field(default="FC")  # FC = Factura Contado, CR = Crédito
+    tipo_documento: Optional[str] = Field(default="FC")  # FC = Factura Contado, CR = Crédito
     numero_documento: Optional[str] = None  # Número completo de factura
     ruc_proveedor: Optional[str] = None  # RUC del emisor
     razon_social_proveedor: Optional[str] = None  # Nombre del emisor
-    condicion_compra: str = Field(default="CONTADO")  # CONTADO/CREDITO
+    condicion_compra: Optional[str] = Field(default="CONTADO")  # CONTADO/CREDITO
     
-    # Importes (formato ASCONT)
-    gravado_10: float = Field(default=0.0)  # Subtotal gravado al 10%
-    iva_10: float = Field(default=0.0)  # IVA 10%
-    gravado_5: float = Field(default=0.0)  # Subtotal gravado al 5%
-    iva_5: float = Field(default=0.0)  # IVA 5%
-    exento: float = Field(default=0.0)  # Monto exento
-    total_factura: float = Field(default=0.0)  # Total de la factura
+    # Importes (formato ASCONT) - TODOS OPCIONALES
+    gravado_10: Optional[float] = Field(default=0.0)  # Subtotal gravado al 10%
+    iva_10: Optional[float] = Field(default=0.0)  # IVA 10%
+    gravado_5: Optional[float] = Field(default=0.0)  # Subtotal gravado al 5%
+    iva_5: Optional[float] = Field(default=0.0)  # IVA 5%
+    exento: Optional[float] = Field(default=0.0)  # Monto exento
+    total_factura: Optional[float] = Field(default=0.0)  # Total de la factura
     
-    # Campos adicionales de control
+    # Campos adicionales de control - OPCIONALES
     timbrado: Optional[str] = None
     cdc: Optional[str] = None
-    moneda: str = Field(default="PYG")
+    moneda: Optional[str] = Field(default="PYG")
     
-    # Campos técnicos
+    # Campos técnicos - OPCIONALES
     email_origen: Optional[str] = None
-    procesado_en: datetime = Field(default_factory=datetime.now)
-    mes_proceso: str = Field(default="")  # YYYY-MM para agrupación
+    procesado_en: Optional[datetime] = Field(default_factory=datetime.now)
+    mes_proceso: Optional[str] = Field(default="")  # YYYY-MM para agrupación
     
-    # Campos legacy para compatibilidad
+    # Campos legacy para compatibilidad - TODOS OPCIONALES
     ruc_emisor: Optional[str] = None
     nombre_emisor: Optional[str] = None
     numero_factura: Optional[str] = None
-    monto_total: float = Field(default=0.0)
-    iva: float = Field(default=0.0)
+    monto_total: Optional[float] = Field(default=0.0)
+    iva: Optional[float] = Field(default=0.0)
     pdf_path: Optional[str] = None
     ruc_cliente: Optional[str] = None
     nombre_cliente: Optional[str] = None
     email_cliente: Optional[str] = None
     condicion_venta: Optional[str] = None
-    subtotal_exentas: float = Field(default=0.0)
-    subtotal_5: float = Field(default=0.0)
-    subtotal_10: float = Field(default=0.0)
+    subtotal_exentas: Optional[float] = Field(default=0.0)
+    subtotal_5: Optional[float] = Field(default=0.0)
+    subtotal_10: Optional[float] = Field(default=0.0)
     actividad_economica: Optional[str] = None
     
     # Datos estructurados
@@ -197,10 +197,13 @@ class InvoiceDataASCONT(BaseModel):
     @classmethod
     def from_dict(cls, data: dict, email_metadata: dict = None):
         try:
-            print(f"[InvoiceDataASCONT.from_dict] Iniciando procesamiento de datos")
+            print(f"[InvoiceDataASCONT.from_dict] ====== INICIANDO PROCESAMIENTO ======")
             print(f"[InvoiceDataASCONT.from_dict] Campos recibidos: {list(data.keys())}")
+            print(f"[InvoiceDataASCONT.from_dict] Datos completos: {data}")
             
-            # Procesar campos problemáticos individualmente
+            # PASO 1: Procesar campos problemáticos individualmente
+            print(f"[InvoiceDataASCONT.from_dict] === PASO 1: PROCESANDO CAMPOS NUMÉRICOS ===")
+            
             print(f"[InvoiceDataASCONT.from_dict] Procesando subtotal_10: {data.get('subtotal_10')} (tipo: {type(data.get('subtotal_10'))})")
             gravado_10_value = safe_float(data.get("subtotal_10"))
             print(f"[InvoiceDataASCONT.from_dict] Resultado gravado_10: {gravado_10_value}")
@@ -225,13 +228,32 @@ class InvoiceDataASCONT(BaseModel):
             total_value = safe_float(data.get("monto_total"))
             print(f"[InvoiceDataASCONT.from_dict] Resultado total: {total_value}")
             
-            # Convertir al nuevo modelo
+            # PASO 2: Procesar fecha
+            print(f"[InvoiceDataASCONT.from_dict] === PASO 2: PROCESANDO FECHA ===")
+            fecha_raw = data.get("fecha")
+            print(f"[InvoiceDataASCONT.from_dict] Fecha raw: {fecha_raw} (tipo: {type(fecha_raw)})")
+            fecha_parsed = try_parse_date(fecha_raw)
+            print(f"[InvoiceDataASCONT.from_dict] Fecha parseada: {fecha_parsed}")
+            
+            # PASO 3: Procesar strings
+            print(f"[InvoiceDataASCONT.from_dict] === PASO 3: PROCESANDO STRINGS ===")
+            numero_doc = data.get("numero_factura")
+            ruc_prov = data.get("ruc_emisor") 
+            nombre_prov = data.get("nombre_emisor")
+            condicion = (data.get("condicion_venta") or "CONTADO").upper()
+            print(f"[InvoiceDataASCONT.from_dict] numero_documento: {numero_doc}")
+            print(f"[InvoiceDataASCONT.from_dict] ruc_proveedor: {ruc_prov}")
+            print(f"[InvoiceDataASCONT.from_dict] razon_social_proveedor: {nombre_prov}")
+            print(f"[InvoiceDataASCONT.from_dict] condicion_compra: {condicion}")
+            
+            # PASO 4: Crear el objeto factura
+            print(f"[InvoiceDataASCONT.from_dict] === PASO 4: CREANDO OBJETO FACTURA ===")
             invoice_data = cls(
-                fecha=try_parse_date(data.get("fecha")),
-                numero_documento=data.get("numero_factura"),
-                ruc_proveedor=data.get("ruc_emisor"),
-                razon_social_proveedor=data.get("nombre_emisor"),
-                condicion_compra=data.get("condicion_venta", "CONTADO").upper(),
+                fecha=fecha_parsed,
+                numero_documento=numero_doc,
+                ruc_proveedor=ruc_prov,
+                razon_social_proveedor=nombre_prov,
+                condicion_compra=condicion,
                 gravado_10=gravado_10_value,
                 iva_10=iva_10_value,
                 gravado_5=gravado_5_value,
@@ -266,7 +288,8 @@ class InvoiceDataASCONT(BaseModel):
                 email_origen=email_metadata.get("sender") if email_metadata else None,
             )
             
-            print(f"[InvoiceDataASCONT.from_dict] Factura procesada exitosamente: {invoice_data.numero_documento}")
+            print(f"[InvoiceDataASCONT.from_dict] ✅ ÉXITO: Factura procesada: {invoice_data.numero_documento}")
+            print(f"[InvoiceDataASCONT.from_dict] Factura final: RUC={invoice_data.ruc_proveedor}, Nombre={invoice_data.razon_social_proveedor}")
             return invoice_data
             
         except Exception as e:
