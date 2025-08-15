@@ -29,48 +29,105 @@ class OpenAIProcessor:
         if not self.api_key:
             logger.warning("No se ha configurado la API key de OpenAI. La extracción de datos no funcionará correctamente.")
     
-    def extract_invoice_data(self, pdf_path: str, email_metadata: Optional[Dict[str, Any]] = None) -> InvoiceData:
+    def extract_invoice_data(self, pdf_path: str, email_metadata: Dict[str, Any] = None) -> InvoiceData:
         """
         Extrae datos de factura desde un archivo PDF usando OpenAI.
         Primero intenta procesamiento como texto, luego como imagen si falla.
+        Incluye validación automática contra CDC.
         
         Args:
             pdf_path: Ruta al archivo PDF
-            email_metadata: Metadatos del email (opcional)
+            email_metadata: Metadatos del correo de donde se extrajo la factura.
             
         Returns:
-            InvoiceData: Objeto con los datos extraídos o None si falla
+            InvoiceData: Objeto con los datos extraídos.
         """
         try:
-            # Estrategia dual: texto primero, imagen como fallback
+            # Estrategia 1: Procesar como texto (más preciso y rápido)
             if self._pdf_has_text(pdf_path):
+                logger.info("📄 PDF tiene texto extractible")
                 logger.info("📄 Procesando PDF como TEXTO")
-                extracted_data = self._process_pdf_as_text(pdf_path, email_metadata)
-                if extracted_data:
-                    result = InvoiceData.from_dict(extracted_data)
-                    if result:
-                        logger.info("✅ Procesamiento como texto exitoso")
-                        return self._validate_and_enhance_with_cdc(result)
+                pdf_text = extract_text(pdf_path).strip()
+                logger.info(f"📄 Texto extraído: {len(pdf_text)} caracteres")
+                
+                prompt = self._build_prompt() + "\n\nTexto de la factura:\n" + pdf_text
+                messages = [{"role": "user", "content": prompt}]
+                
+                try:
+                    # Procesar como texto
+                    response = openai.ChatCompletion.create(
+                        model="gpt-4o",
+                        messages=messages,
+                        max_tokens=1000,
+                        temperature=0.3
+                    )
                     
-                logger.warning("❌ Procesamiento como texto falló, intentando como imagen")
+                    raw_output = response.choices[0].message.content
+                    logger.info(f"Respuesta OpenAI (texto): {raw_output}")
+                    
+                    json_data = self._extract_clean_json(raw_output)
+                    if json_data and isinstance(json_data, dict):
+                        invoice = InvoiceData.from_dict(json_data, email_metadata)
+                        if invoice:
+                            logger.info("✅ Procesamiento como texto exitoso")
+                            return self._validate_and_enhance_with_cdc(invoice)
+                    
+                except Exception as text_error:
+                    logger.error(f"Error en procesamiento de texto: {text_error}")
+                    logger.warning("❌ Procesamiento como texto falló, intentando como imagen")
             
-            # Fallback a procesamiento como imagen
+            # Estrategia 2: Procesar como imagen (fallback)
             logger.info("🖼️ Procesando PDF como IMAGEN")
-            extracted_data = self._process_pdf_with_openai(pdf_path, email_metadata)
-            if extracted_data:
-                result = InvoiceData.from_dict(extracted_data)
-                if result:
-                    logger.info("✅ Procesamiento como imagen exitoso")
-                    return self._validate_and_enhance_with_cdc(result)
+            image_data = self._convert_pdf_to_image(pdf_path)
+            prompt = self._build_prompt()
+            messages = [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
+                ]
+            }]
+
+            # Enviar a OpenAI como imagen
+            response = openai.ChatCompletion.create(
+                model="gpt-4o",
+                messages=messages,
+                max_tokens=1000,
+                temperature=0.3
+            )
+
+            raw_output = response.choices[0].message.content
+            logger.info(f"Respuesta OpenAI bruta: {raw_output}")
             
-            # Si no se pudo extraer datos, crear factura básica mejorada
-            logger.warning("No se pudieron extraer datos con OpenAI, creando entrada básica")
-            basic_invoice = self._create_basic_invoice_from_filename(pdf_path, email_metadata)
-            if basic_invoice:
-                # Intentar mejorar con información del CDC
-                return self._enhance_basic_invoice_from_cdc(basic_invoice)
-            return basic_invoice
-            
+            try:
+                json_data = self._extract_clean_json(raw_output)
+                if not isinstance(json_data, dict):
+                    raise ValueError("La respuesta no es un objeto JSON válido")
+
+                # Crear factura desde datos de OpenAI
+                invoice = InvoiceData.from_dict(json_data, email_metadata)
+                if invoice is None:
+                    raise ValueError("El resultado de from_dict fue None")
+
+                logger.info("✅ Procesamiento como imagen exitoso")
+                # ✨ NUEVA FUNCIONALIDAD: Validar y corregir fecha contra CDC
+                validated_invoice = self._validate_and_enhance_with_cdc(invoice)
+                return validated_invoice
+
+            except Exception as e:
+                logger.error(f"Error al procesar la respuesta JSON de OpenAI: {str(e)}")
+                logger.error(f"Respuesta que causó el error: '{raw_output}'")
+                
+                # Si OpenAI rechaza el procesamiento, crear una factura básica
+                if "no puedo ayudar" in raw_output.lower() or "lo siento" in raw_output.lower():
+                    logger.warning("OpenAI rechazó procesar el PDF, creando entrada básica")
+                    basic_invoice = self._create_basic_invoice_from_filename(pdf_path, email_metadata)
+                    if basic_invoice:
+                        return self._enhance_basic_invoice_from_cdc(basic_invoice)
+                    return basic_invoice
+                
+                return None
+
         except Exception as e:
             logger.error(f"Error al procesar PDF con OpenAI: {str(e)}")
             # Fallback a factura básica mejorada
@@ -796,3 +853,19 @@ Analiza cuidadosamente esta factura paraguaya y extrae TODOS los siguientes camp
             logger.error(f"❌ Error al mejorar factura básica con CDC: {str(e)}")
             logger.error(f"❌ Traceback completo:", exc_info=True)
             return invoice
+
+    def _extract_clean_json(self, text: str) -> dict:
+        """
+        Extrae y limpia un objeto JSON desde texto potencialmente envuelto en ```json ... ``` o ```
+        
+        Args:
+            text: Texto que contiene el JSON
+            
+        Returns:
+            dict: Objeto JSON parseado
+        """
+        # Eliminar posibles bloques de markdown tipo ```json o ```
+        cleaned = re.sub(r"```json\s*", "", text.strip(), flags=re.IGNORECASE)
+        cleaned = re.sub(r"```", "", cleaned)
+        
+        return json.loads(cleaned)
