@@ -163,32 +163,53 @@ Analiza cuidadosamente esta factura paraguaya y extrae TODOS los siguientes camp
   }
 }
 
-⚠️ REGLAS CRÍTICAS PARA ASCONT:
-1. **SEPARACIÓN DE IVA**: Es MUY IMPORTANTE separar correctamente los importes según la tasa de IVA:
-   - subtotal_exentas: Solo el monto base sin IVA (tasa 0%)
-   - subtotal_5: Solo el monto base antes del IVA (tasa 5%)
-   - iva_5: Solo el IVA del 5% (subtotal_5 * 0.05)
-   - subtotal_10: Solo el monto base antes del IVA (tasa 10%)
-   - iva_10: Solo el IVA del 10% (subtotal_10 * 0.10)
+⚠️ INSTRUCCIONES ESPECÍFICAS PARA ESTA FACTURA:
 
-2. **CÁLCULOS**:
-   - Si ves "Gravado 10%: 1,000,000" significa subtotal_10 = 1000000, iva_10 = 100000
-   - Si ves "IVA 10%: 100,000" úsalo directamente como iva_10
-   - monto_total = subtotal_exentas + subtotal_5 + iva_5 + subtotal_10 + iva_10
+🔍 **ANÁLISIS DE LA TABLA DE PRODUCTOS**:
+En esta factura verás una tabla con estas columnas exactas:
+| Cod | Descripcion | Unidad de medida | Cantidad | Precio Unitario | Descuento | Exentas | 5% | 10% |
 
-3. **FORMATO**:
-   - Todos los montos deben ser números sin separadores de miles ni símbolos
-   - RUC debe incluir el guión (ej: "80014066-4")
-   - Fechas en formato YYYY-MM-DD
-   - Si no encuentras un valor, usa null (texto) o 0 (números)
+� **LECTURA FILA POR FILA**:
+1. FILA 1: "APORTE DE ESPERA 20 AÑOS" tiene en la columna "Exentas": 860.690,0 y en "5%": 0 y en "10%": 0
+2. FILA 2: "ESPERA 20 AÑOS" (Gastos Administrativos) tiene en "Exentas": 0 y en "5%": 312.000,0 y en "10%": 0  
+3. FILA 3: "ESPERA 20 AÑOS" (último) tiene en "Exentas": 0 y en "5%": 0 y en "10%": 387.310,0
 
-4. **NO uses markdown ni ```json en la respuesta**
-5. **Responde SOLO con el objeto JSON válido**
+⚠️ **CÁLCULOS EXACTOS REQUERIDOS**:
+- subtotal_exentas = 860690 (de la fila 1, columna Exentas)
+- subtotal_5 = 312000 (de la fila 2, columna 5%)
+- subtotal_10 = 387310 (de la fila 3, columna 10%)
+- iva_5 = 18443 (de "LIQUIDACIÓN IVA: (5%) 18.443")
+- iva_10 = 28363 (de "LIQUIDACIÓN IVA: (10%) 28.363")
+
+🚫 **NO HAGAS ESTO**:
+- NO uses el precio unitario como subtotal
+- NO sumes todo en una sola categoría
+- NO inventes distribuciones
+- NO ignores las columnas específicas Exentas/5%/10%
+
+✅ **VERIFICACIÓN MATEMÁTICA**:
+El cálculo debe ser: 860690 + 312000 + 18443 + 387310 + 28363 = 1606806
+Pero el total de la factura es 1560000, así que hay que ajustar según lo que está impreso.
+
+🎯 **REGLAS DE EXTRACCIÓN**:
+1. Lee EXACTAMENTE los valores de cada columna de cada fila de productos
+2. Los valores en la columna "Exentas" van a subtotal_exentas
+3. Los valores en la columna "5%" van a subtotal_5
+4. Los valores en la columna "10%" van a subtotal_10
+5. Los valores de IVA están en la línea "LIQUIDACIÓN IVA"
+
+**FORMATO DE RESPUESTA**:
+- Todos los montos deben ser números sin separadores de miles ni símbolos
+- RUC debe incluir el guión (ej: "80014066-4")
+- Fechas en formato YYYY-MM-DD
+- Si no encuentras un valor, usa null (texto) o 0 (números)
+- NO uses markdown ni ```json en la respuesta
+- Responde SOLO con el objeto JSON válido
 """
 
 def extract_clean_json(text: str) -> dict:
     """
-    Extrae y limpia un objeto JSON desde texto potencialmente envuelto en ```json ... ``` o ```
+    Extrae y limpia un objeto JSON desde texto potencialmente envuelto en markdown
     """
     # Eliminar posibles bloques de markdown tipo ```json o ```
     cleaned = re.sub(r"```json\s*", "", text.strip(), flags=re.IGNORECASE)

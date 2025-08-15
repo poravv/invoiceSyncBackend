@@ -1,7 +1,47 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Union
 from datetime import datetime
 from app.utils.date_utils import try_parse_date
+
+def safe_float(value, default=0.0) -> float:
+    """Convierte un valor a float de manera segura, manejando listas y otros tipos."""
+    if value is None:
+        return default
+    
+    # Si es una lista, tomar el primer elemento numérico
+    if isinstance(value, list):
+        for item in value:
+            try:
+                if isinstance(item, (int, float)):
+                    return float(item)
+                elif isinstance(item, str) and item.strip():
+                    # Limpiar separadores de miles
+                    cleaned = item.replace(',', '').replace('.', '', item.count('.') - 1 if '.' in item else 0)
+                    return float(cleaned)
+            except (ValueError, TypeError):
+                continue
+        return default
+    
+    # Si es string, limpiar y convertir
+    if isinstance(value, str):
+        if not value.strip():
+            return default
+        try:
+            # Limpiar separadores de miles (mantener solo el último punto como decimal)
+            cleaned = value.replace(',', '').replace(' ', '')
+            if cleaned.count('.') > 1:
+                # Múltiples puntos: el último es decimal, los anteriores son separadores de miles
+                parts = cleaned.rsplit('.', 1)
+                cleaned = parts[0].replace('.', '') + '.' + parts[1]
+            return float(cleaned)
+        except (ValueError, TypeError):
+            return default
+    
+    # Si es número, convertir directamente
+    if isinstance(value, (int, float)):
+        return float(value)
+    
+    return default
 
 class ProductoFactura(BaseModel):
     """Modelo para los productos/servicios en la factura."""
@@ -153,12 +193,12 @@ class InvoiceDataASCONT(BaseModel):
                 ruc_proveedor=data.get("ruc_emisor"),
                 razon_social_proveedor=data.get("nombre_emisor"),
                 condicion_compra=data.get("condicion_venta", "CONTADO").upper(),
-                gravado_10=float(data.get("subtotal_10", 0)),
-                iva_10=float(data.get("iva_10", 0)),
-                gravado_5=float(data.get("subtotal_5", 0)),
-                iva_5=float(data.get("iva_5", 0)),
-                exento=float(data.get("subtotal_exentas", 0)),
-                total_factura=float(data.get("monto_total", 0)),
+                gravado_10=safe_float(data.get("subtotal_10")),
+                iva_10=safe_float(data.get("iva_10")),
+                gravado_5=safe_float(data.get("subtotal_5")),
+                iva_5=safe_float(data.get("iva_5")),
+                exento=safe_float(data.get("subtotal_exentas")),
+                total_factura=safe_float(data.get("monto_total")),
                 timbrado=data.get("timbrado"),
                 cdc=data.get("cdc"),
                 moneda=data.get("moneda", "PYG"),
@@ -167,15 +207,15 @@ class InvoiceDataASCONT(BaseModel):
                 ruc_emisor=data.get("ruc_emisor"),
                 nombre_emisor=data.get("nombre_emisor"),
                 numero_factura=data.get("numero_factura"),
-                monto_total=float(data.get("monto_total", 0)),
-                iva=float(data.get("iva", 0)),
+                monto_total=safe_float(data.get("monto_total")),
+                iva=safe_float(data.get("iva")),
                 ruc_cliente=data.get("ruc_cliente"),
                 nombre_cliente=data.get("nombre_cliente"),
                 email_cliente=data.get("email_cliente"),
                 condicion_venta=data.get("condicion_venta"),
-                subtotal_exentas=float(data.get("subtotal_exentas", 0)),
-                subtotal_5=float(data.get("subtotal_5", 0)),
-                subtotal_10=float(data.get("subtotal_10", 0)),
+                subtotal_exentas=safe_float(data.get("subtotal_exentas")),
+                subtotal_5=safe_float(data.get("subtotal_5")),
+                subtotal_10=safe_float(data.get("subtotal_10")),
                 actividad_economica=data.get("actividad_economica"),
                 
                 empresa=EmpresaData(**data["empresa"]) if data.get("empresa") else None,

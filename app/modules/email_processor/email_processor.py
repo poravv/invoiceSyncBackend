@@ -514,7 +514,7 @@ class EmailProcessor:
     
     def save_pdf_from_binary(self, content: bytes, filename: str) -> str:
         """
-        Guarda el contenido binario de un PDF en un archivo.
+        Guarda el contenido binario de un PDF en un archivo con nombre único garantizado.
         
         Args:
             content: Contenido binario del PDF.
@@ -524,16 +524,26 @@ class EmailProcessor:
             str: Ruta al archivo guardado o cadena vacía en caso de error.
         """
         try:
+            import uuid
+            
             # Crear el directorio si no existe
             os.makedirs(settings.TEMP_PDF_DIR, exist_ok=True)
             
-            # Generar un nombre único para evitar colisiones
-            safe_filename = re.sub(r'[^\w\-_\. ]', '_', filename)
-            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            unique_filename = f"{timestamp}_{safe_filename}"
+            # Limpiar el nombre del archivo original
+            safe_filename = self._sanitize_filename(filename)
+            
+            # Generar nombre único con garantía absoluta
+            unique_filename = self._generate_unique_filename(safe_filename)
             
             # Ruta completa del archivo
             file_path = os.path.join(settings.TEMP_PDF_DIR, unique_filename)
+            
+            # Verificar una vez más que no existe (por si acaso)
+            if os.path.exists(file_path):
+                # Si por alguna razón ya existe, agregar UUID adicional
+                name, ext = os.path.splitext(unique_filename)
+                unique_filename = f"{name}_{uuid.uuid4().hex[:8]}{ext}"
+                file_path = os.path.join(settings.TEMP_PDF_DIR, unique_filename)
             
             # Guardar el archivo
             with open(file_path, "wb") as f:
@@ -545,6 +555,60 @@ class EmailProcessor:
         except Exception as e:
             logger.error(f"Error al guardar PDF {filename}: {str(e)}")
             return ""
+    
+    def _sanitize_filename(self, filename: str) -> str:
+        """
+        Limpia el nombre del archivo eliminando caracteres problemáticos.
+        
+        Args:
+            filename: Nombre original del archivo
+            
+        Returns:
+            str: Nombre limpio y seguro
+        """
+        # Remover caracteres no permitidos en nombres de archivo
+        safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+        
+        # Remover caracteres de control y espacios extras
+        safe_filename = re.sub(r'[\x00-\x1f\x7f-\x9f]', '_', safe_filename)
+        safe_filename = re.sub(r'\s+', '_', safe_filename.strip())
+        
+        # Limitar longitud (reservar espacio para timestamp y UUID)
+        name, ext = os.path.splitext(safe_filename)
+        if len(name) > 100:  # Limitar a 100 caracteres el nombre base
+            name = name[:100]
+        
+        # Asegurar extensión .pdf
+        if not ext.lower().endswith('.pdf'):
+            ext = '.pdf'
+            
+        return f"{name}{ext}"
+    
+    def _generate_unique_filename(self, clean_filename: str) -> str:
+        """
+        Genera un nombre de archivo único garantizado.
+        
+        Args:
+            clean_filename: Nombre de archivo ya limpio
+            
+        Returns:
+            str: Nombre único con timestamp y UUID
+        """
+        import uuid
+        
+        # Timestamp con microsegundos para máxima precisión
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")[:-3]  # Quitar últimos 3 dígitos de microsegundos
+        
+        # UUID corto para garantizar unicidad absoluta
+        unique_id = uuid.uuid4().hex[:8]
+        
+        # Separar nombre y extensión
+        name, ext = os.path.splitext(clean_filename)
+        
+        # Construir nombre único: timestamp_uuid_nombre_original.pdf
+        unique_filename = f"{timestamp}_{unique_id}_{name}{ext}"
+        
+        return unique_filename
     
     def download_pdf_from_url(self, url: str) -> str:
         """

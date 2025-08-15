@@ -129,28 +129,28 @@ class ExcelExporterASCONT:
                 # Convertir fecha a string para mejor visualización
                 fecha_str = invoice.fecha.strftime("%d/%m/%Y") if invoice.fecha else ""
                 
-                # Mapear al formato ASCONT
+                # Mapear al formato ASCONT exacto
                 ascont_record = {
                     "Fecha": fecha_str,
-                    "Tipo Documento": getattr(invoice, 'tipo_documento', 'FC'),
-                    "Número Documento": getattr(invoice, 'numero_documento', invoice.numero_factura or ""),
-                    "RUC Proveedor": getattr(invoice, 'ruc_proveedor', invoice.ruc_emisor or ""),
-                    "Razón Social Proveedor": getattr(invoice, 'razon_social_proveedor', invoice.nombre_emisor or ""),
-                    "Condición Compra": getattr(invoice, 'condicion_compra', invoice.condicion_venta or "CONTADO"),
+                    "Tipo Documento": self._determinar_tipo_documento(invoice),
+                    "Número Documento": invoice.numero_factura or "",
+                    "RUC Proveedor": invoice.ruc_emisor or "",
+                    "Razón Social Proveedor": invoice.nombre_emisor or "",
+                    "Condición Compra": self._normalizar_condicion_compra(invoice.condicion_venta),
                     
-                    # Importes en formato ASCONT
-                    "Gravado 10%": float(getattr(invoice, 'gravado_10', invoice.subtotal_10 or 0)),
-                    "IVA 10%": float(getattr(invoice, 'iva_10', 0)),
-                    "Gravado 5%": float(getattr(invoice, 'gravado_5', invoice.subtotal_5 or 0)),
-                    "IVA 5%": float(getattr(invoice, 'iva_5', 0)),
-                    "Exento": float(getattr(invoice, 'exento', invoice.subtotal_exentas or 0)),
-                    "Total Factura": float(getattr(invoice, 'total_factura', invoice.monto_total or 0)),
+                    # Importes en formato ASCONT - convertir a enteros como en el ejemplo
+                    "Gravado 10%": int(getattr(invoice, 'subtotal_10', 0) or 0),
+                    "IVA 10%": int(self._calcular_iva_10(invoice)),
+                    "Gravado 5%": int(getattr(invoice, 'subtotal_5', 0) or 0),
+                    "IVA 5%": int(self._calcular_iva_5(invoice)),
+                    "Exento": int(getattr(invoice, 'subtotal_exentas', 0) or 0),
+                    "Total Factura": int(invoice.monto_total or 0),
                     
                     # Campos adicionales
                     "Timbrado": invoice.timbrado or "",
-                    "CDC": invoice.cdc or "",
+                    "CDC": self._formatear_cdc(invoice.cdc),
                     "Moneda": invoice.moneda or "PYG",
-                    "Email Origen": invoice.email_origen or "",
+                    "Email Origen": self._formatear_email_origen(invoice.email_origen),
                     "Procesado En": invoice.procesado_en.strftime("%d/%m/%Y %H:%M:%S") if invoice.procesado_en else ""
                 }
                 
@@ -446,6 +446,149 @@ class ExcelExporterASCONT:
             return excel_path
         
         return None
+    
+    def _determinar_tipo_documento(self, invoice) -> str:
+        """
+        Determina el tipo de documento según el formato ASCONT.
+        
+        Args:
+            invoice: Datos de la factura
+            
+        Returns:
+            str: Tipo de documento ('FC', 'CR', etc.)
+        """
+        condicion = getattr(invoice, 'condicion_venta', '').upper()
+        
+        if 'CONTADO' in condicion:
+            return 'FC'  # Factura Contado
+        elif 'CREDITO' in condicion or 'CRÉDITO' in condicion:
+            return 'CR'  # Crédito
+        else:
+            return 'FC'  # Default a Factura Contado
+    
+    def _normalizar_condicion_compra(self, condicion_venta: str) -> str:
+        """
+        Normaliza la condición de compra según el formato ASCONT.
+        
+        Args:
+            condicion_venta: Condición original de la factura
+            
+        Returns:
+            str: Condición normalizada ('CONTADO' o 'CREDITO')
+        """
+        if not condicion_venta:
+            return 'CONTADO'
+        
+        condicion_upper = condicion_venta.upper()
+        
+        if 'CONTADO' in condicion_upper:
+            return 'CONTADO'
+        elif 'CREDITO' in condicion_upper or 'CRÉDITO' in condicion_upper:
+            return 'CREDITO'
+        else:
+            return 'CONTADO'  # Default
+    
+    def _calcular_iva_10(self, invoice) -> int:
+        """
+        Calcula el IVA del 10% si no está presente en la factura.
+        
+        Args:
+            invoice: Datos de la factura
+            
+        Returns:
+            int: Valor del IVA del 10%
+        """
+        # Buscar IVA explícito primero
+        iva_10_explicito = getattr(invoice, 'iva_10', None)
+        if iva_10_explicito is not None and iva_10_explicito > 0:
+            return int(iva_10_explicito)
+        
+        # Si no hay IVA explícito, calcularlo del subtotal_10
+        subtotal_10 = getattr(invoice, 'subtotal_10', 0) or 0
+        if subtotal_10 > 0:
+            return int(round(subtotal_10 * 0.10))
+        
+        return 0
+    
+    def _calcular_iva_5(self, invoice) -> int:
+        """
+        Calcula el IVA del 5% si no está presente en la factura.
+        
+        Args:
+            invoice: Datos de la factura
+            
+        Returns:
+            int: Valor del IVA del 5%
+        """
+        # Buscar IVA explícito primero
+        iva_5_explicito = getattr(invoice, 'iva_5', None)
+        if iva_5_explicito is not None and iva_5_explicito > 0:
+            return int(iva_5_explicito)
+        
+        # Si no hay IVA explícito, calcularlo del subtotal_5
+        subtotal_5 = getattr(invoice, 'subtotal_5', 0) or 0
+        if subtotal_5 > 0:
+            return int(round(subtotal_5 * 0.05))
+        
+        return 0
+    
+    def _formatear_cdc(self, cdc: str) -> str:
+        """
+        Formatea el CDC según el formato ASCONT.
+        
+        Args:
+            cdc: Código CDC original
+            
+        Returns:
+            str: CDC formateado
+        """
+        if not cdc:
+            return ""
+        
+        # Limpiar el CDC de espacios y guiones
+        cdc_limpio = cdc.replace(" ", "").replace("-", "")
+        
+        # Si ya tiene el formato con espacios, mantenerlo
+        if " " in cdc:
+            return cdc
+        
+        # Si no, formatear con espacios cada 4 dígitos
+        if len(cdc_limpio) >= 44:  # CDC completo
+            # Formatear: XXXX XXXX XXXX XXXX XXXX XXXX XXXX XXXX XXXX XXXX XXXX
+            formatted = ""
+            for i in range(0, len(cdc_limpio), 4):
+                if i > 0:
+                    formatted += " "
+                formatted += cdc_limpio[i:i+4]
+            return formatted
+        
+        return cdc
+    
+    def _formatear_email_origen(self, email_origen: str) -> str:
+        """
+        Formatea el email de origen según el formato ASCONT.
+        
+        Args:
+            email_origen: Email original
+            
+        Returns:
+            str: Email formateado
+        """
+        if not email_origen:
+            return ""
+        
+        # Si ya contiene formato "Nombre <email>", mantenerlo
+        if "<" in email_origen and ">" in email_origen:
+            return email_origen
+        
+        # Si es solo un email, agregarlo con formato básico
+        if "@" in email_origen:
+            # Extraer nombre del email (parte antes del @)
+            nombre_usuario = email_origen.split("@")[0]
+            nombre_formateado = nombre_usuario.replace(".", " ").title()
+            return f"{nombre_formateado} <{email_origen}>"
+        
+        return email_origen
 
 # Mantener clase original para compatibilidad hacia atrás
 class ExcelExporter(ExcelExporterASCONT):
