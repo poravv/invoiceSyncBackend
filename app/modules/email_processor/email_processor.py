@@ -46,6 +46,38 @@ class MultiEmailProcessor:
         
         logger.info(f"MultiEmailProcessor inicializado con {len(self.email_configs)} cuentas de correo")
     
+    def _remove_duplicate_invoices(self, invoices: List[InvoiceData]) -> List[InvoiceData]:
+        """
+        Elimina facturas duplicadas basándose en el CDC.
+        
+        Args:
+            invoices: Lista de facturas que puede contener duplicados
+            
+        Returns:
+            Lista de facturas sin duplicados
+        """
+        seen_cdcs = set()
+        unique_invoices = []
+        
+        for invoice in invoices:
+            # Usar CDC como identificador único
+            cdc = getattr(invoice, 'cdc', '') or ''
+            
+            # Si no tiene CDC, usar una combinación de campos como identificador
+            if not cdc:
+                identifier = f"{getattr(invoice, 'numero_factura', '')}-{getattr(invoice, 'ruc_emisor', '')}-{getattr(invoice, 'monto_total', 0)}"
+            else:
+                identifier = cdc
+            
+            if identifier and identifier not in seen_cdcs:
+                seen_cdcs.add(identifier)
+                unique_invoices.append(invoice)
+                logger.debug(f"Factura única agregada: {getattr(invoice, 'numero_factura', 'N/A')} - CDC: {cdc}")
+            else:
+                logger.warning(f"Factura duplicada omitida: {getattr(invoice, 'numero_factura', 'N/A')} - CDC: {cdc}")
+        
+        return unique_invoices
+    
     def process_all_emails(self) -> ProcessResult:
         """
         Procesa correos de todas las cuentas configuradas.
@@ -89,11 +121,17 @@ class MultiEmailProcessor:
                 error_messages.append(f"Error en {email_config.username}: {str(e)}")
                 logger.error(f"Error al procesar cuenta {email_config.username}: {str(e)}")
         
-        # Exportar todas las facturas a Excel
+        # Eliminar duplicados por CDC antes de exportar
         if all_invoices:
-            excel_path = self.excel_exporter.export_invoices(all_invoices)
+            unique_invoices = self._remove_duplicate_invoices(all_invoices)
+            logger.info(f"Facturas únicas después de eliminar duplicados: {len(unique_invoices)} (originales: {len(all_invoices)})")
+            
+            excel_path = self.excel_exporter.export_invoices(unique_invoices)
             if excel_path:
                 excel_files.append(excel_path)
+            
+            # Actualizar all_invoices para el mensaje de resultado
+            all_invoices = unique_invoices
         
         # Crear mensaje de resultado
         if success_count == len(self.email_configs):

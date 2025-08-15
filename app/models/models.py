@@ -5,43 +5,54 @@ from app.utils.date_utils import try_parse_date
 
 def safe_float(value, default=0.0) -> float:
     """Convierte un valor a float de manera segura, manejando listas y otros tipos."""
-    if value is None:
-        return default
-    
-    # Si es una lista, tomar el primer elemento numérico
-    if isinstance(value, list):
-        for item in value:
+    try:
+        if value is None:
+            return default
+        
+        # Si es una lista, tomar el primer elemento numérico
+        if isinstance(value, list):
+            print(f"[safe_float] Procesando lista: {value}")
+            for item in value:
+                try:
+                    if isinstance(item, (int, float)):
+                        return float(item)
+                    elif isinstance(item, str) and item.strip():
+                        # Limpiar separadores de miles
+                        cleaned = item.replace(',', '').replace('.', '', item.count('.') - 1 if '.' in item else 0)
+                        return float(cleaned)
+                except (ValueError, TypeError) as e:
+                    print(f"[safe_float] Error procesando item de lista {item}: {e}")
+                    continue
+            print(f"[safe_float] No se pudo procesar ningún elemento de la lista, retornando default: {default}")
+            return default
+        
+        # Si es string, limpiar y convertir
+        if isinstance(value, str):
+            if not value.strip():
+                return default
             try:
-                if isinstance(item, (int, float)):
-                    return float(item)
-                elif isinstance(item, str) and item.strip():
-                    # Limpiar separadores de miles
-                    cleaned = item.replace(',', '').replace('.', '', item.count('.') - 1 if '.' in item else 0)
-                    return float(cleaned)
-            except (ValueError, TypeError):
-                continue
+                # Limpiar separadores de miles (mantener solo el último punto como decimal)
+                cleaned = value.replace(',', '').replace(' ', '')
+                if cleaned.count('.') > 1:
+                    # Múltiples puntos: el último es decimal, los anteriores son separadores de miles
+                    parts = cleaned.rsplit('.', 1)
+                    cleaned = parts[0].replace('.', '') + '.' + parts[1]
+                return float(cleaned)
+            except (ValueError, TypeError) as e:
+                print(f"[safe_float] Error procesando string '{value}': {e}")
+                return default
+        
+        # Si es número, convertir directamente
+        if isinstance(value, (int, float)):
+            return float(value)
+        
+        # Si es otro tipo, convertir a string y procesar
+        print(f"[safe_float] Tipo no reconocido {type(value)}: {value}, intentando str()")
+        return safe_float(str(value), default)
+        
+    except Exception as e:
+        print(f"[safe_float] Error general procesando {value} (tipo: {type(value)}): {e}")
         return default
-    
-    # Si es string, limpiar y convertir
-    if isinstance(value, str):
-        if not value.strip():
-            return default
-        try:
-            # Limpiar separadores de miles (mantener solo el último punto como decimal)
-            cleaned = value.replace(',', '').replace(' ', '')
-            if cleaned.count('.') > 1:
-                # Múltiples puntos: el último es decimal, los anteriores son separadores de miles
-                parts = cleaned.rsplit('.', 1)
-                cleaned = parts[0].replace('.', '') + '.' + parts[1]
-            return float(cleaned)
-        except (ValueError, TypeError):
-            return default
-    
-    # Si es número, convertir directamente
-    if isinstance(value, (int, float)):
-        return float(value)
-    
-    return default
 
 class ProductoFactura(BaseModel):
     """Modelo para los productos/servicios en la factura."""
@@ -186,6 +197,34 @@ class InvoiceDataASCONT(BaseModel):
     @classmethod
     def from_dict(cls, data: dict, email_metadata: dict = None):
         try:
+            print(f"[InvoiceDataASCONT.from_dict] Iniciando procesamiento de datos")
+            print(f"[InvoiceDataASCONT.from_dict] Campos recibidos: {list(data.keys())}")
+            
+            # Procesar campos problemáticos individualmente
+            print(f"[InvoiceDataASCONT.from_dict] Procesando subtotal_10: {data.get('subtotal_10')} (tipo: {type(data.get('subtotal_10'))})")
+            gravado_10_value = safe_float(data.get("subtotal_10"))
+            print(f"[InvoiceDataASCONT.from_dict] Resultado gravado_10: {gravado_10_value}")
+            
+            print(f"[InvoiceDataASCONT.from_dict] Procesando iva_10: {data.get('iva_10')} (tipo: {type(data.get('iva_10'))})")
+            iva_10_value = safe_float(data.get("iva_10"))
+            print(f"[InvoiceDataASCONT.from_dict] Resultado iva_10: {iva_10_value}")
+            
+            print(f"[InvoiceDataASCONT.from_dict] Procesando subtotal_5: {data.get('subtotal_5')} (tipo: {type(data.get('subtotal_5'))})")
+            gravado_5_value = safe_float(data.get("subtotal_5"))
+            print(f"[InvoiceDataASCONT.from_dict] Resultado gravado_5: {gravado_5_value}")
+            
+            print(f"[InvoiceDataASCONT.from_dict] Procesando iva_5: {data.get('iva_5')} (tipo: {type(data.get('iva_5'))})")
+            iva_5_value = safe_float(data.get("iva_5"))
+            print(f"[InvoiceDataASCONT.from_dict] Resultado iva_5: {iva_5_value}")
+            
+            print(f"[InvoiceDataASCONT.from_dict] Procesando subtotal_exentas: {data.get('subtotal_exentas')} (tipo: {type(data.get('subtotal_exentas'))})")
+            exento_value = safe_float(data.get("subtotal_exentas"))
+            print(f"[InvoiceDataASCONT.from_dict] Resultado exento: {exento_value}")
+            
+            print(f"[InvoiceDataASCONT.from_dict] Procesando monto_total: {data.get('monto_total')} (tipo: {type(data.get('monto_total'))})")
+            total_value = safe_float(data.get("monto_total"))
+            print(f"[InvoiceDataASCONT.from_dict] Resultado total: {total_value}")
+            
             # Convertir al nuevo modelo
             invoice_data = cls(
                 fecha=try_parse_date(data.get("fecha")),
@@ -193,12 +232,12 @@ class InvoiceDataASCONT(BaseModel):
                 ruc_proveedor=data.get("ruc_emisor"),
                 razon_social_proveedor=data.get("nombre_emisor"),
                 condicion_compra=data.get("condicion_venta", "CONTADO").upper(),
-                gravado_10=safe_float(data.get("subtotal_10")),
-                iva_10=safe_float(data.get("iva_10")),
-                gravado_5=safe_float(data.get("subtotal_5")),
-                iva_5=safe_float(data.get("iva_5")),
-                exento=safe_float(data.get("subtotal_exentas")),
-                total_factura=safe_float(data.get("monto_total")),
+                gravado_10=gravado_10_value,
+                iva_10=iva_10_value,
+                gravado_5=gravado_5_value,
+                iva_5=iva_5_value,
+                exento=exento_value,
+                total_factura=total_value,
                 timbrado=data.get("timbrado"),
                 cdc=data.get("cdc"),
                 moneda=data.get("moneda", "PYG"),
@@ -207,15 +246,15 @@ class InvoiceDataASCONT(BaseModel):
                 ruc_emisor=data.get("ruc_emisor"),
                 nombre_emisor=data.get("nombre_emisor"),
                 numero_factura=data.get("numero_factura"),
-                monto_total=safe_float(data.get("monto_total")),
+                monto_total=total_value,
                 iva=safe_float(data.get("iva")),
                 ruc_cliente=data.get("ruc_cliente"),
                 nombre_cliente=data.get("nombre_cliente"),
                 email_cliente=data.get("email_cliente"),
                 condicion_venta=data.get("condicion_venta"),
-                subtotal_exentas=safe_float(data.get("subtotal_exentas")),
-                subtotal_5=safe_float(data.get("subtotal_5")),
-                subtotal_10=safe_float(data.get("subtotal_10")),
+                subtotal_exentas=exento_value,
+                subtotal_5=gravado_5_value,
+                subtotal_10=gravado_10_value,
                 actividad_economica=data.get("actividad_economica"),
                 
                 empresa=EmpresaData(**data["empresa"]) if data.get("empresa") else None,
@@ -227,10 +266,15 @@ class InvoiceDataASCONT(BaseModel):
                 email_origen=email_metadata.get("sender") if email_metadata else None,
             )
             
+            print(f"[InvoiceDataASCONT.from_dict] Factura procesada exitosamente: {invoice_data.numero_documento}")
             return invoice_data
             
         except Exception as e:
-            print(f"[InvoiceDataASCONT.from_dict] Error: {e}")
+            print(f"[InvoiceDataASCONT.from_dict] Error detallado: {e}")
+            print(f"[InvoiceDataASCONT.from_dict] Tipo de error: {type(e)}")
+            print(f"[InvoiceDataASCONT.from_dict] Datos recibidos: {data}")
+            import traceback
+            print(f"[InvoiceDataASCONT.from_dict] Traceback: {traceback.format_exc()}")
             return None
 
 # Mantener InvoiceData para compatibilidad hacia atrás

@@ -89,13 +89,10 @@ class OpenAIProcessor:
                 # Si OpenAI rechaza el procesamiento, crear una factura básica
                 if "no puedo ayudar" in raw_output.lower() or "lo siento" in raw_output.lower():
                     logger.warning("OpenAI rechazó procesar el PDF, creando entrada básica")
-                    basic_invoice = self._create_basic_invoice_from_filename(pdf_path, email_metadata)
-                    if basic_invoice:
-                        # Intentar extraer algunos datos básicos del CDC si está disponible
-                        basic_invoice = self._enhance_basic_invoice_from_cdc(basic_invoice)
-                    return basic_invoice
+                    return self._create_basic_invoice_from_filename(pdf_path, email_metadata)
                 
                 return None
+
 
         except Exception as e:
             logger.error(f"Error al procesar la factura con OpenAI: {str(e)}")
@@ -120,11 +117,8 @@ class OpenAIProcessor:
             page = doc.load_page(0)
             
             # Usar DPI más alto para mejor calidad
-            pix = page.get_pixmap(dpi=400)  # Aumentado de 300 a 400
-            
-            # Convertir a PNG para mejor calidad
-            image_bytes = pix.tobytes("png")
-            doc.close()
+            pix = page.get_pixmap(dpi=300)  # Aumentado de 200 a 300
+            image_bytes = pix.tobytes("jpeg")
             
             # Log del tamaño de la imagen
             logger.info(f"Imagen generada: {len(image_bytes)} bytes, dimensiones: {pix.width}x{pix.height}")
@@ -139,9 +133,7 @@ class OpenAIProcessor:
 
     def _build_prompt(self) -> str:
         return """
-Eres un asistente especializado en facturas paraguayas. Necesito que extraigas información de esta FACTURA COMERCIAL/ELECTRÓNICA para el sistema contable ASCONT.
-
-IMPORTANTE: Esta es una factura comercial legítima emitida por una empresa paraguaya para fines contables. Por favor, analiza la imagen y extrae los siguientes campos:
+Analiza cuidadosamente esta factura paraguaya y extrae TODOS los siguientes campos en formato JSON estructurado. Esta información será usada para el sistema contable ASCONT, así que es MUY IMPORTANTE que extraigas los importes correctamente según las tasas de IVA:
 
 {
   "fecha": "YYYY-MM-DD",
@@ -215,7 +207,7 @@ IMPORTANTE: Esta es una factura comercial legítima emitida por una empresa para
 En esta factura verás una tabla con estas columnas exactas:
 | Cod | Descripcion | Unidad de medida | Cantidad | Precio Unitario | Descuento | Exentas | 5% | 10% |
 
-✅ **LECTURA FILA POR FILA**:
+� **LECTURA FILA POR FILA**:
 1. FILA 1: "APORTE DE ESPERA 20 AÑOS" tiene en la columna "Exentas": 860.690,0 y en "5%": 0 y en "10%": 0
 2. FILA 2: "ESPERA 20 AÑOS" (Gastos Administrativos) tiene en "Exentas": 0 y en "5%": 312.000,0 y en "10%": 0  
 3. FILA 3: "ESPERA 20 AÑOS" (último) tiene en "Exentas": 0 y en "5%": 0 y en "10%": 387.310,0
@@ -253,6 +245,21 @@ Pero el total de la factura es 1560000, así que hay que ajustar según lo que e
 - Responde SOLO con el objeto JSON válido
 """
 
+def extract_clean_json(text: str) -> dict:
+    """
+    Extrae y limpia un objeto JSON desde texto potencialmente envuelto en markdown
+    """
+    # Eliminar posibles bloques de markdown tipo ```json o ```
+    cleaned = re.sub(r"```json\s*", "", text.strip(), flags=re.IGNORECASE)
+    cleaned = re.sub(r"```", "", cleaned)
+    
+    return json.loads(cleaned)
+
+
+class OpenAIProcessor:
+    def __init__(self):
+        openai.api_key = settings.OPENAI_API_KEY
+    
     def _create_basic_invoice_from_filename(self, pdf_path: str, email_metadata: Dict[str, Any] = None) -> InvoiceData:
         """
         Crea una factura básica cuando OpenAI no puede procesar el PDF.
@@ -333,63 +340,3 @@ Pero el total de la factura es 1560000, así que hay que ajustar según lo que e
         except Exception as e:
             logger.error(f"Error creando factura básica: {str(e)}")
             return None
-    
-    def _enhance_basic_invoice_from_cdc(self, invoice: InvoiceData) -> InvoiceData:
-        """
-        Mejora la factura básica extrayendo información adicional del CDC.
-        
-        Args:
-            invoice: Factura básica a mejorar
-            
-        Returns:
-            Factura mejorada con información del CDC
-        """
-        try:
-            cdc = getattr(invoice, 'cdc', '')
-            if not cdc or len(cdc) != 44:
-                return invoice
-            
-            # El CDC paraguayo tiene estructura específica:
-            # Posiciones 0-7: RUC emisor (sin DV)
-            # Posiciones 8-10: DV + tipo documento + establecimiento
-            # Posiciones 11-13: Punto expedición
-            # Posiciones 14-20: Número secuencial
-            # Posiciones 21-22: Tipo documento
-            # Posiciones 23-30: Fecha (YYYYMMDD)
-            # Resto: control y verificación
-            
-            ruc_base = cdc[0:8]
-            dv = cdc[8]
-            ruc_completo = f"{ruc_base}-{dv}"
-            
-            # Extraer fecha del CDC (posiciones 23-30)
-            fecha_str = cdc[23:31]
-            if len(fecha_str) == 8 and fecha_str.isdigit():
-                year = fecha_str[0:4]
-                month = fecha_str[4:6]
-                day = fecha_str[6:8]
-                fecha_cdc = f"{year}-{month}-{day}"
-                
-                # Actualizar la factura con información del CDC
-                invoice.ruc_emisor = ruc_completo
-                invoice.fecha = datetime.strptime(fecha_cdc, "%Y-%m-%d").date()
-                invoice.nombre_emisor = f"EMISOR RUC {ruc_completo} - VERIFICAR DATOS MANUALMENTE"
-                
-                logger.info(f"Factura básica mejorada con CDC: RUC {ruc_completo}, Fecha {fecha_cdc}")
-            
-            return invoice
-            
-        except Exception as e:
-            logger.warning(f"Error al mejorar factura básica con CDC: {str(e)}")
-            return invoice
-
-
-def extract_clean_json(text: str) -> dict:
-    """
-    Extrae y limpia un objeto JSON desde texto potencialmente envuelto en markdown
-    """
-    # Eliminar posibles bloques de markdown tipo ```json o ```
-    cleaned = re.sub(r"```json\s*", "", text.strip(), flags=re.IGNORECASE)
-    cleaned = re.sub(r"```", "", cleaned)
-    
-    return json.loads(cleaned)
