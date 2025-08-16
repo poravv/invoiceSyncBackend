@@ -108,77 +108,88 @@ class OpenAIProcessor:
     def _process_as_text(self, pdf_path: str, email_metadata: Dict[str, Any] = None) -> Optional[InvoiceData]:
         """
         Procesa PDF extrayendo texto y enviándolo a OpenAI.
-        
+
         Args:
             pdf_path: Ruta al PDF
             email_metadata: Metadatos del email
-            
+
         Returns:
             InvoiceData procesada o None si falla
         """
         try:
             logger.info("📄 Procesando PDF como TEXTO")
-            
+
             # PASO 1: Extraer texto del PDF con manejo de errores robusto
             logger.info("📄 PASO 1: Iniciando extracción de texto del PDF")
             try:
+                from pdfminer.high_level import extract_text
                 pdf_text = extract_text(pdf_path)
                 logger.info(f"📄 PASO 1a: extract_text completado, tipo resultado: {type(pdf_text)}")
-                
+
                 if isinstance(pdf_text, list):
                     logger.warning(f"📄 PASO 1b: extract_text devolvió lista con {len(pdf_text)} elementos")
-                    logger.info(f"📄 PASO 1b: Elementos de la lista: {pdf_text[:3]}...")  # Primeros 3 elementos
+                    logger.info(f"📄 PASO 1b: Elementos de la lista: {pdf_text[:3]}...")
                     pdf_text = " ".join(str(item) for item in pdf_text if item)
                     logger.info(f"📄 PASO 1b: Lista combinada exitosamente")
-                
+
                 pdf_text = str(pdf_text).strip()
                 logger.info(f"📄 PASO 1c: Texto convertido a string y limpiado")
-                
+
             except Exception as e:
-                logger.error(f"📄 PASO 1 ERROR CRÍTICO en extract_text: {e}")
-                logger.error(f"📄 PASO 1 ERROR tipo de excepción: {type(e)}")
-                import traceback
-                logger.error(f"📄 PASO 1 ERROR traceback: {traceback.format_exc()}")
-                return None
-                
+                logger.warning(f"📄 PASO 1 ERROR con pdfminer: {e}. Aplicando fallback con PyMuPDF")
+                import fitz  # PyMuPDF
+                try:
+                    doc = fitz.open(pdf_path)
+                    pdf_text = ""
+                    for page in doc:
+                        pdf_text += page.get_text()
+                    pdf_text = pdf_text.strip()
+                    doc.close()
+                    logger.info(f"📄 PASO 1d: Fallback con PyMuPDF completado - {len(pdf_text)} caracteres")
+                except Exception as e2:
+                    logger.error(f"📄 PASO 1 ERROR CRÍTICO en PyMuPDF: {e2}")
+                    import traceback
+                    logger.error(f"📄 PASO 1 ERROR traceback: {traceback.format_exc()}")
+                    return None
+
             if not pdf_text:
                 logger.warning("📄 PASO 1 FALLO: No se pudo extraer texto del PDF")
                 return None
-                
+
             logger.info(f"📄 PASO 1 ÉXITO: Texto extraído - {len(pdf_text)} caracteres")
             logger.info(f"📄 PASO 1 MUESTRA: '{pdf_text[:200]}...'")
-            
+
             # PASO 2: Construir prompt y enviar a OpenAI
             logger.info("📄 PASO 2: Construyendo prompt para OpenAI")
             prompt = self._build_text_prompt(pdf_text)
             logger.info(f"📄 PASO 2a: Prompt construido - {len(prompt)} caracteres")
-            
+
             messages = [{"role": "user", "content": prompt}]
             logger.info("📄 PASO 2b: Enviando request a OpenAI...")
-            
+
             response = openai.ChatCompletion.create(
                 model="gpt-4o",
                 messages=messages,
                 max_tokens=1000,
                 temperature=0.3
             )
-            
+
             raw_output = response.choices[0].message.content
             logger.info(f"📄 PASO 2 ÉXITO: Respuesta OpenAI recibida - {len(raw_output)} caracteres")
             logger.info(f"📄 PASO 2 RESPUESTA COMPLETA: {raw_output}")
-            
+
             # PASO 3: Procesar respuesta con validación mejorada
             logger.info("📄 PASO 3: Procesando respuesta de OpenAI")
             result = self._process_openai_response(raw_output, email_metadata, fallback_text=pdf_text)
-            
+
             if result:
                 logger.info("📄 PASO 3 ÉXITO: Procesamiento de texto completado exitosamente")
                 logger.info(f"📄 PASO 3 RESULTADO: RUC={getattr(result, 'ruc_emisor', 'N/A')}, Nombre={getattr(result, 'nombre_emisor', 'N/A')}")
             else:
                 logger.warning("📄 PASO 3 FALLO: _process_openai_response devolvió None")
-            
+
             return result
-            
+
         except Exception as e:
             logger.error(f"📄 ERROR GENERAL en procesamiento de texto: {str(e)}")
             logger.error(f"📄 ERROR GENERAL tipo: {type(e)}")
@@ -707,7 +718,7 @@ IMPORTANTE: Esta factura podría NO tener IVA (ser 100% exenta). En ese caso, to
             page = doc[0]
             
             # Renderizar a imagen de alta calidad (300 DPI)
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+            pix = page.get_pixmap(matrix=fitz.Matrix(3, 3),alpha=False)
             img_data = pix.tobytes("jpeg")
             doc.close()
             
@@ -822,11 +833,7 @@ IMPORTANTE: Esta factura podría NO tener IVA (ser 100% exenta). En ese caso, to
             dict: Dictionary con datos normalizados
         """
         try:
-            logger.info("🔧 NORMALIZACIÓN: Iniciando normalización de campos JSON")
-            logger.info(f"🔧 NORMALIZACIÓN: Campos de entrada: {list(data.keys())}")
-            
-            # PASO 1: Normalizar campos numéricos (pueden venir como listas)
-            logger.info("🔧 NORMALIZACIÓN PASO 1: Procesando campos numéricos")
+            # Normalizar campos numéricos (pueden venir como listas)
             numeric_fields = [
                 'subtotal_exentas', 'subtotal_5', 'iva_5', 'subtotal_10', 
                 'iva_10', 'monto_total'
@@ -834,88 +841,65 @@ IMPORTANTE: Esta factura podría NO tener IVA (ser 100% exenta). En ese caso, to
             
             for field in numeric_fields:
                 if field in data:
-                    original_value = data[field]
-                    logger.info(f"🔧 NORMALIZACIÓN {field}: Valor original: {original_value} (tipo: {type(original_value)})")
+                    value = data[field]
                     
                     # Si es lista, tomar primer elemento
-                    if isinstance(original_value, list):
-                        logger.warning(f"🔧 NORMALIZACIÓN {field}: Campo vino como lista: {original_value}")
-                        if original_value:
-                            data[field] = self._safe_float_convert(original_value[0])
-                            logger.info(f"🔧 NORMALIZACIÓN {field}: Tomado primer elemento: {data[field]}")
-                        else:
-                            data[field] = 0.0
-                            logger.info(f"🔧 NORMALIZACIÓN {field}: Lista vacía, asignado 0.0")
-                    else:
-                        # Convertir a float de manera segura
-                        data[field] = self._safe_float_convert(original_value)
-                        logger.info(f"🔧 NORMALIZACIÓN {field}: Convertido a float: {data[field]}")
-            
-            # PASO 2: Limpiar campos de string (CDC, RUCs, etc.)
-            logger.info("🔧 NORMALIZACIÓN PASO 2: Procesando campos de string")
-            string_fields = ['cdc', 'ruc_emisor', 'numero_factura', 'timbrado']
-            
-            for field in string_fields:
-                if field in data:
-                    original_value = data[field]
-                    logger.info(f"🔧 NORMALIZACIÓN {field}: Valor original: '{original_value}' (tipo: {type(original_value)})")
+                    if isinstance(value, list):
+                        logger.warning(f"🔧 Campo {field} vino como lista: {value}")
+                        value = value[0] if value else 0
                     
-                    if isinstance(original_value, list):
-                        logger.warning(f"🔧 NORMALIZACIÓN {field}: Campo string vino como lista: {original_value}")
-                        if original_value:
-                            data[field] = str(original_value[0]).strip()
-                            logger.info(f"🔧 NORMALIZACIÓN {field}: Tomado primer elemento: '{data[field]}'")
-                        else:
-                            data[field] = ""
-                            logger.info(f"🔧 NORMALIZACIÓN {field}: Lista vacía, asignado string vacío")
-                    elif original_value is not None:
-                        data[field] = str(original_value).strip()
-                        logger.info(f"🔧 NORMALIZACIÓN {field}: Convertido a string: '{data[field]}'")
+                    # Convertir a número
+                    data[field] = self._safe_convert_to_float(value)
             
-            # PASO 3: Limpiar CDC específicamente (remover espacios)
+            # Limpiar CDC (remover espacios)
             if 'cdc' in data and isinstance(data['cdc'], str):
-                original_cdc = data['cdc']
                 data['cdc'] = re.sub(r'\s+', '', data['cdc'])
-                logger.info(f"🔧 NORMALIZACIÓN CDC: Limpiado de '{original_cdc}' a '{data['cdc']}'")
             
-            # PASO 4: Normalizar fechas
-            if 'fecha' in data and data['fecha']:
-                original_fecha = data['fecha']
-                logger.info(f"🔧 NORMALIZACIÓN fecha: Valor original: '{original_fecha}' (tipo: {type(original_fecha)})")
-                
-                if isinstance(original_fecha, list) and original_fecha:
-                    data['fecha'] = str(original_fecha[0])
-                    logger.info(f"🔧 NORMALIZACIÓN fecha: Lista convertida a: '{data['fecha']}'")
-                elif original_fecha is not None:
-                    data['fecha'] = str(original_fecha)
-                    logger.info(f"🔧 NORMALIZACIÓN fecha: Convertido a string: '{data['fecha']}'")
+            # Normalizar campos string que pueden venir como listas
+            string_fields = ['numero_factura', 'ruc_emisor', 'nombre_emisor', 'fecha', 'timbrado']
+            for field in string_fields:
+                if field in data and isinstance(data[field], list):
+                    logger.warning(f"🔧 Campo {field} vino como lista: {data[field]}")
+                    data[field] = data[field][0] if data[field] else ""
             
-            logger.info("✅ NORMALIZACIÓN ÉXITO: Todos los campos normalizados")
-            logger.info(f"🔧 NORMALIZACIÓN RESULTADO: {data}")
+            # Normalizar condicion_venta (puede ser null)
+            if 'condicion_venta' in data:
+                if data['condicion_venta'] is None:
+                    data['condicion_venta'] = "CONTADO"
+                elif isinstance(data['condicion_venta'], list):
+                    data['condicion_venta'] = data['condicion_venta'][0] if data['condicion_venta'] else "CONTADO"
+                    
+            logger.info(f"JSON Normalizado: {data}")
             return data
             
         except Exception as e:
-            logger.error(f"❌ NORMALIZACIÓN ERROR: {e}")
-            logger.error(f"❌ NORMALIZACIÓN ERROR tipo: {type(e)}")
-            import traceback
-            logger.error(f"❌ NORMALIZACIÓN ERROR traceback: {traceback.format_exc()}")
-            # Devolver datos originales en caso de error
+            logger.error(f"❌ Error normalizando campos: {e}")
             return data
-    
-    def _safe_float_convert(self, value):
-        """Convierte un valor a float de manera segura."""
-        try:
-            if value is None or value == "":
-                return 0.0
-            if isinstance(value, (int, float)):
-                return float(value)
-            if isinstance(value, str):
-                # Limpiar separadores de miles y comas
-                cleaned = value.replace(',', '').replace(' ', '')
-                return float(cleaned) if cleaned else 0.0
+
+    def _safe_convert_to_float(self, value: Any) -> float:
+        """
+        Convierte cualquier valor a float de forma segura.
+        
+        Args:
+            value: Valor a convertir
+            
+        Returns:
+            float: Valor convertido o 0.0 si no se puede convertir
+        """
+        if value is None:
             return 0.0
-        except (ValueError, TypeError):
-            logger.warning(f"🔧 No se pudo convertir '{value}' a float, usando 0.0")
+            
+        if isinstance(value, (int, float)):
+            return float(value)
+            
+        try:
+            # Limpiar string y convertir
+            if isinstance(value, str):
+                clean_value = re.sub(r'[^\d.,]', '', str(value))
+                if clean_value:
+                    return float(clean_value.replace(',', '.'))
+            return 0.0
+        except:
             return 0.0
     
     # =========================================================================

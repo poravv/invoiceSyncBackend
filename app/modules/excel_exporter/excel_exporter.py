@@ -129,37 +129,39 @@ class ExcelExporterASCONT:
                 # Convertir fecha a string para mejor visualización
                 fecha_str = invoice.fecha.strftime("%d/%m/%Y") if invoice.fecha else ""
                 
-                # Mapear al formato ASCONT exacto
+                # Concatenar detalle_articulos en descripcion con salto de línea
+                detalle_articulos = self._generar_detalle_articulos(invoice)
+                descripcion_base = getattr(invoice, 'descripcion_factura', '') or ""
+                if detalle_articulos:
+                    descripcion_final = f"{descripcion_base}\n{detalle_articulos}"
+                else:
+                    descripcion_final = descripcion_base
                 ascont_record = {
-                    "Fecha": fecha_str,
-                    "Tipo Documento": self._determinar_tipo_documento(invoice),
-                    "Número Documento": invoice.numero_factura or "",
-                    "RUC Proveedor": invoice.ruc_emisor or "",
-                    "Razón Social Proveedor": invoice.nombre_emisor or "",
-                    "Condición Compra": self._normalizar_condicion_compra(invoice.condicion_venta),
-                    
-                    # Importes en formato ASCONT - convertir a enteros como en el ejemplo
-                    "Gravado 10%": int(getattr(invoice, 'subtotal_10', 0) or 0),
-                    "IVA 10%": int(self._calcular_iva_10(invoice)),
-                    "Gravado 5%": int(getattr(invoice, 'subtotal_5', 0) or 0),
-                    "IVA 5%": int(self._calcular_iva_5(invoice)),
-                    "Exento": int(getattr(invoice, 'subtotal_exentas', 0) or 0),
-                    "Total Factura": int(invoice.monto_total or 0),
-                    
-                    # Campos adicionales
-                    "Timbrado": invoice.timbrado or "",
+                    "fecha": fecha_str,
+                    "factura": invoice.numero_factura or "",  # Número Documento
+                    "ruc": invoice.ruc_emisor or "",
+                    "razon": invoice.nombre_emisor or "",
+                    "tipo": self._determinar_tipo_documento_real(invoice),  # CO o CR
+                    "gra10": int(getattr(invoice, 'subtotal_10', 0) or 0),  # iva 10%
+                    "iva10": int(self._calcular_iva_10(invoice)),
+                    "gra5": int(getattr(invoice, 'subtotal_5', 0) or 0),
+                    "iva5": int(self._calcular_iva_5(invoice)),
+                    "exentos": int(getattr(invoice, 'subtotal_exentas', 0) or 0),
+                    "num_tim": invoice.timbrado or "",  # Timbrado
+                    "descripcion": descripcion_final,
+                    "moneda": getattr(invoice, 'moneda', 'GS') or 'GS',
+                    "tipo_cambio": float(getattr(invoice, 'tipo_cambio', 1.0) or 1.0),
                     "CDC": self._formatear_cdc(invoice.cdc),
-                    "Moneda": invoice.moneda or "PYG",
-                    "Email Origen": self._formatear_email_origen(invoice.email_origen),
-                    "Procesado En": invoice.procesado_en.strftime("%d/%m/%Y %H:%M:%S") if invoice.procesado_en else ""
+                    "email_origen": self._formatear_email_origen(invoice.email_origen),
+                    "procesado_en": invoice.procesado_en.strftime("%d/%m/%Y %H:%M:%S") if invoice.procesado_en else ""
                 }
                 
                 # Calcular IVAs si no están presentes
-                if ascont_record["IVA 10%"] == 0 and ascont_record["Gravado 10%"] > 0:
-                    ascont_record["IVA 10%"] = round(ascont_record["Gravado 10%"] * 0.10, 2)
+                if ascont_record["iva10"] == 0 and ascont_record["gra10"] > 0:
+                    ascont_record["iva10"] = round(ascont_record["gra10"] * 0.10, 2)
                 
-                if ascont_record["IVA 5%"] == 0 and ascont_record["Gravado 5%"] > 0:
-                    ascont_record["IVA 5%"] = round(ascont_record["Gravado 5%"] * 0.05, 2)
+                if ascont_record["iva5"] == 0 and ascont_record["gra5"] > 0:
+                    ascont_record["iva5"] = round(ascont_record["gra5"] * 0.05, 2)
                 
                 ascont_data.append(ascont_record)
                 
@@ -178,13 +180,13 @@ class ExcelExporterASCONT:
                             total = float(getattr(producto, 'total', 0))
                         
                         productos_data.append({
-                            "Número Documento": ascont_record["Número Documento"],
-                            "RUC Proveedor": ascont_record["RUC Proveedor"],
-                            "Fecha": fecha_str,
-                            "Artículo": articulo,
-                            "Cantidad": cantidad,
-                            "Precio Unitario": precio_unitario,
-                            "Total": total
+                            "factura": ascont_record["factura"],
+                            "ruc": ascont_record["ruc"],
+                            "fecha": fecha_str,
+                            "articulo": articulo,
+                            "cantidad": cantidad,
+                            "precio_unitario": precio_unitario,
+                            "total": total
                         })
             
             # Cargar datos existentes si el archivo ya existe
@@ -196,7 +198,7 @@ class ExcelExporterASCONT:
                     # Combinar y eliminar duplicados
                     combined_df = pd.concat([existing_df, new_df], ignore_index=True)
                     combined_df.drop_duplicates(
-                        subset=["RUC Proveedor", "Número Documento", "Total Factura", "CDC"],
+                        subset=["ruc", "factura", "CDC"],
                         keep="last",
                         inplace=True
                     )
@@ -207,7 +209,7 @@ class ExcelExporterASCONT:
                         productos_df = pd.DataFrame(productos_data)
                         combined_productos_df = pd.concat([existing_productos_df, productos_df], ignore_index=True)
                         combined_productos_df.drop_duplicates(
-                            subset=["Número Documento", "RUC Proveedor", "Artículo"],
+                            subset=["factura", "ruc", "articulo"],
                             keep="last",
                             inplace=True
                         )
@@ -590,6 +592,50 @@ class ExcelExporterASCONT:
             return f"{nombre_formateado} <{email_origen}>"
         
         return email_origen
+
+    def _determinar_tipo_documento_real(self, invoice) -> str:
+        """
+        Determina el tipo de documento según el formato real requerido.
+        CO para contado, CR para crédito.
+        """
+        condicion = ""
+        if hasattr(invoice, 'condicion_venta') and invoice.condicion_venta:
+            condicion = invoice.condicion_venta.upper()
+        elif hasattr(invoice, 'condicion_compra') and invoice.condicion_compra:
+            condicion = invoice.condicion_compra.upper()
+        
+        if "CREDITO" in condicion or "CREDIT" in condicion:
+            return "CR"
+        else:
+            return "CO"  # CO para contado (en lugar de FC)
+    
+    def _generar_detalle_articulos(self, invoice) -> str:
+        """
+        Genera la cadena de artículos concatenados por comas.
+        """
+        try:
+            # Primero intentar desde el campo detalle_articulos si existe
+            if hasattr(invoice, 'detalle_articulos') and invoice.detalle_articulos:
+                return invoice.detalle_articulos
+            
+            # Si no, generar desde productos
+            if not hasattr(invoice, 'productos') or not invoice.productos:
+                return ""
+            
+            articulos = []
+            for producto in invoice.productos:
+                if isinstance(producto, dict):
+                    articulo = producto.get('articulo', '')
+                    if articulo:
+                        articulos.append(str(articulo))
+                elif hasattr(producto, 'articulo') and producto.articulo:
+                    articulos.append(str(producto.articulo))
+            
+            return ", ".join(articulos) if articulos else ""
+            
+        except Exception as e:
+            logger.warning(f"Error generando detalle de artículos: {e}")
+            return ""
 
 # Mantener clase original para compatibilidad hacia atrás
 class ExcelExporter(ExcelExporterASCONT):

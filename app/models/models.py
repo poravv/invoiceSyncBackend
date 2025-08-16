@@ -117,7 +117,10 @@ class InvoiceDataASCONT(BaseModel):
     # Campos adicionales de control - OPCIONALES
     timbrado: Optional[str] = None
     cdc: Optional[str] = None
-    moneda: Optional[str] = Field(default="PYG")
+    moneda: Optional[str] = Field(default="GS")  # GS o USD
+    tipo_cambio: Optional[float] = Field(default=1.0)  # Tipo de cambio
+    descripcion_factura: Optional[str] = Field(default="")  # Descripción de la factura
+    detalle_articulos: Optional[str] = Field(default="")  # Artículos concatenados por comas
     
     # Campos técnicos - OPCIONALES
     email_origen: Optional[str] = None
@@ -170,13 +173,15 @@ class InvoiceDataASCONT(BaseModel):
         if not self.numero_documento and self.numero_factura:
             self.numero_documento = self.numero_factura
         
-        # Mapear condición de compra
+        # Mapear condición de compra y tipo de documento
         if self.condicion_venta:
             self.condicion_compra = self.condicion_venta.upper()
         
-        # Mapear tipo de documento basado en condición
+        # Mapear tipo de documento: CO para CONTADO, CR para CREDITO
         if self.condicion_compra == "CREDITO":
             self.tipo_documento = "CR"
+        else:
+            self.tipo_documento = "CO"  # CO en lugar de FC según el formato real
         
         # Mapear importes
         if not self.gravado_10 and self.subtotal_10:
@@ -193,6 +198,18 @@ class InvoiceDataASCONT(BaseModel):
             self.iva_10 = self.gravado_10 * 0.10
         if not self.iva_5 and self.gravado_5:
             self.iva_5 = self.gravado_5 * 0.05
+        
+        # Mapear moneda de PYG a GS
+        if self.moneda == "PYG":
+            self.moneda = "GS"
+        
+        # Generar detalle de artículos concatenado
+        if self.productos:
+            articulos = []
+            for producto in self.productos:
+                if hasattr(producto, 'articulo') and producto.articulo:
+                    articulos.append(str(producto.articulo))
+            self.detalle_articulos = ", ".join(articulos) if articulos else ""
 
     @classmethod
     def from_dict(cls, data: dict, email_metadata: dict = None):
@@ -262,7 +279,9 @@ class InvoiceDataASCONT(BaseModel):
                 total_factura=total_value,
                 timbrado=data.get("timbrado"),
                 cdc=data.get("cdc"),
-                moneda=data.get("moneda", "PYG"),
+                moneda=data.get("moneda", "GS"),  # Usar GS por defecto
+                tipo_cambio=safe_float(data.get("tipo_cambio", 1.0)),
+                descripcion_factura=data.get("descripcion_factura", ""),
                 
                 # Campos legacy para compatibilidad
                 ruc_emisor=data.get("ruc_emisor"),
