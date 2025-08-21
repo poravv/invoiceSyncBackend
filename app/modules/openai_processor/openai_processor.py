@@ -35,7 +35,7 @@ import io
 
 from app.config.settings import settings
 from app.models.models import InvoiceData
-#from pdfminer.high_level import extract_text
+from pdfminer.high_level import extract_text
 from pdfminer.high_level import extract_text as extract_text_pdfminer
 
 
@@ -100,17 +100,14 @@ class OpenAIProcessor:
                 return result
                 
             logger.warning("❌ Ambas estrategias OpenAI fallaron")
+
+            if result is None:
+                logger.warning("⛔ Result is None.")
+                return None
             
         except Exception as e:
             logger.error(f"❌ Error en procesamiento OpenAI: {str(e)}")
-        
-        # ESTRATEGIA 3: Fallback a factura básica
-        logger.info("🔧 Creando factura básica como fallback")
-        basic_invoice = self._create_basic_invoice_from_filename(pdf_path, email_metadata)
-        if basic_invoice:
-            return self._enhance_basic_invoice_with_cdc(basic_invoice)
-        
-        return basic_invoice
+            return None
 
     def _process_as_text(self, pdf_path: str, email_metadata: Dict[str, Any] = None) -> Optional[InvoiceData]:
         """
@@ -129,12 +126,19 @@ class OpenAIProcessor:
             # === PASO 1: Extraer texto del PDF ===
             pdf_text = ""
 
-            # === INTENTO 1: pdfplumber ===
             try:
                 logger.info("📄 Intentando con pdfplumber...")
                 with pdfplumber.open(pdf_path) as pdf:
                     for page in pdf.pages:
-                        pdf_text += page.extract_text_pdfminer() or ""
+                        text = page.extract_text() or ""
+                        pdf_text += text + "\n"
+
+                        table = page.extract_table()
+                        if table:
+                            pdf_text += "\n[TABLA DETECTADA]\n"
+                            for row in table:
+                                pdf_text += " | ".join(cell or "" for cell in row) + "\n"
+
                 pdf_text = pdf_text.strip()
                 if pdf_text:
                     logger.info(f"✅ pdfplumber extrajo {len(pdf_text)} caracteres")
@@ -180,7 +184,7 @@ class OpenAIProcessor:
                 logger.warning("📄 No se pudo extraer texto del PDF con ningún método")
                 return None
             # === FILTRO PARA DESCARTAR NOTAS DE REMISIÓN ===
-            remision_keywords = ["nota de remisión", "remisión electrónica", "nota de entrega", "remisión de mercaderías"]
+            remision_keywords = ["remisión"]
             if any(kw in pdf_text.lower() for kw in remision_keywords):
                 logger.warning("📄 Documento detectado como Nota de Remisión. Se omite del procesamiento.")
                 return None
@@ -209,13 +213,12 @@ class OpenAIProcessor:
                     logger.info("✅ Resultado procesado exitosamente desde respuesta de OpenAI")
                     return result
                 else:
-                    raise ValueError("OpenAI devolvió respuesta vacía o inválida")
+                    logger.warning("⛔ Result is None.")
+                    return None
             except Exception as e:
                 logger.warning(f"⚠️ Fallo procesando JSON con from_dict: {e}")
-                invoice = InvoiceData()
-                invoice.observacion = f"Respuesta parcial OpenAI:\n{raw_output}"
                 logger.info("✅ Guardando respuesta parcial en observación")
-                return invoice
+                return None
 
         except Exception as e:
             logger.error(f"❌ Error general en _process_as_text: {e}")
@@ -241,9 +244,18 @@ class OpenAIProcessor:
             # Convertir PDF a imagen
             image_data = self._convert_pdf_to_image(pdf_path)
 
+            logger.info(f"Imagen base64 {image_data[:100]}...")
+
             ocr_text = self.extract_text_from_base64_image(image_data)
             #Si extrae texto de la imagen entra aqui 
             if ocr_text:
+
+                # === FILTRO PARA DESCARTAR NOTAS DE REMISIÓN ===
+                remision_keywords = ["nota de remisión", "remisión electrónica", "nota de entrega", "remisión de mercaderías"]
+                if any(kw in ocr_text.lower() for kw in remision_keywords):
+                    logger.warning("📄 Documento detectado como Nota de Remisión. Se omite del procesamiento.")
+                    return None
+                
                 logger.info(f"🔍 Texto OCR desde imagen:\n{ocr_text[:500]}...")
                 logger.info("🤖 Enviando solicitud a OpenAI...")
                 prompt = self._build_text_prompt(ocr_text)
@@ -253,9 +265,12 @@ class OpenAIProcessor:
                     max_tokens=1000,
                     temperature=0.3
                 )
+                
                 raw_output = response.choices[0].message.content
                 logger.info(f"🤖 Respuesta OpenAI recibida: {len(raw_output)} caracteres")
                 logger.debug(f"🔎 OpenAI Response Preview: {raw_output}...")
+
+                
 
                 # === PASO 3: Procesar la respuesta JSON ===
                 try:
@@ -264,13 +279,12 @@ class OpenAIProcessor:
                         logger.info("✅ Resultado procesado exitosamente desde respuesta de OpenAI")
                         return result
                     else:
-                        raise ValueError("OpenAI devolvió respuesta vacía o inválida")
+                        logger.warning("⛔ Result is None.")
+                        return None
                 except Exception as e:
                     logger.warning(f"⚠️ Fallo procesando JSON con from_dict: {e}")
-                    invoice = InvoiceData()
-                    invoice.observacion = f"Respuesta parcial OpenAI:\n{raw_output}"
                     logger.info("✅ Guardando respuesta parcial en observación")
-                    return invoice
+                    return None
             else:
                 prompt = self._build_enhanced_image_prompt()
                 messages = [{
@@ -426,7 +440,7 @@ Debes devolver el siguiente JSON:
   "ruc_cliente": "número",
   "nombre_cliente": "nombre completo",
   "email_cliente": null,
-  "moneda": "PYG",
+  "moneda": "GS",
   "actividad_economica": "descripción",
 
   "empresa": {
@@ -513,9 +527,6 @@ Debes devolver el siguiente JSON:
             for phrase in rejection_phrases:
                 if phrase in raw_output.lower():
                     logger.warning(f"🚫 PASO 3.1 RECHAZO: OpenAI rechazó con frase: '{phrase}'")
-                    if fallback_text:
-                        logger.info("🔧 PASO 3.1 FALLBACK: Intentando extraer datos básicos del texto")
-                        return self._extract_basic_data_from_text(fallback_text, email_metadata)
                     return None
             
             logger.info("✅ PASO 3.1 ÉXITO: OpenAI no rechazó el procesamiento")
@@ -527,9 +538,6 @@ Debes devolver el siguiente JSON:
             
             if not isinstance(json_data, dict):
                 logger.warning(f"⚠️ PASO 3.2 FALLO: JSON inválido - tipo: {type(json_data)}, valor: {json_data}")
-                if fallback_text:
-                    logger.info("🔧 PASO 3.2 FALLBACK: Extrayendo datos básicos del texto")
-                    return self._extract_basic_data_from_text(fallback_text, email_metadata)
                 raise ValueError("Respuesta no es un objeto JSON válido")
             
             logger.info(f"✅ PASO 3.2 ÉXITO: JSON válido extraído con {len(json_data)} campos")
@@ -550,21 +558,15 @@ Debes devolver el siguiente JSON:
                 invoice = InvoiceData.from_dict(json_data, email_metadata)
             except Exception as e:
                 logger.warning(f"❌ from_dict falló: {e}")
-                invoice = InvoiceData()
-                invoice.observacion = f"Extracción parcial: {json.dumps(json_data, ensure_ascii=False)}"
-                # Aquí podés asignar manualmente campos clave si están disponibles
-                for campo in ['ruc_emisor', 'nombre_emisor', 'fecha', 'monto_total']:
-                    if campo in json_data:
-                        setattr(invoice, campo, json_data[campo])
+                logger.warning("⛔ Result is None. No se generará InvoiceData vacío.")
+                return None
+                # # Aquí podés asignar manualmente campos clave si están disponibles
+                # for campo in ['ruc_emisor', 'nombre_emisor', 'fecha', 'monto_total']:
+                #     if campo in json_data:
+                #         setattr(invoice, campo, json_data[campo])
+
+
             logger.info(f"🔄 PASO 3.3a: from_dict completado, resultado: {type(invoice)}")
-            
-            # Se comenta para evitar carga generica de informacion 
-            # if invoice is None:
-            #     logger.warning("⚠️ PASO 3.3 FALLO: from_dict devolvió None")
-            #     if fallback_text:
-            #         logger.info("🔧 PASO 3.3 FALLBACK: Extrayendo datos básicos del texto")
-            #         return self._extract_basic_data_from_text(fallback_text, email_metadata)
-            #     raise ValueError("El resultado de from_dict fue None")
 
             logger.info("✅ PASO 3.3 ÉXITO: Factura creada exitosamente")
             logger.info(f"🔄 PASO 3.3 FACTURA: RUC={getattr(invoice, 'ruc_emisor', 'N/A')}, Nombre={getattr(invoice, 'nombre_emisor', 'N/A')}")
@@ -579,162 +581,18 @@ Debes devolver el siguiente JSON:
             except Exception as e:
                 logger.warning(f"⚠️ PASO 3.4 ERROR en validación CDC: {e}, devolviendo factura sin validar")
                 logger.warning(f"⚠️ PASO 3.4 ERROR tipo: {type(e)}")
-                import traceback
-                logger.warning(f"⚠️ PASO 3.4 ERROR traceback: {traceback.format_exc()}")
                 return invoice
 
         except Exception as e:
             logger.error(f"❌ PASO 3 ERROR GENERAL procesando respuesta OpenAI: {str(e)}")
             logger.error(f"❌ PASO 3 ERROR GENERAL tipo: {type(e)}")
             logger.error(f"❌ PASO 3 ERROR GENERAL respuesta problemática: '{raw_output}...'")
-            import traceback
             logger.error(f"❌ PASO 3 ERROR GENERAL traceback: {traceback.format_exc()}")
-            
-            if fallback_text:
-                logger.info("🔧 PASO 3 FALLBACK FINAL: Extrayendo datos básicos del texto")
-                return self._extract_basic_data_from_text(fallback_text, email_metadata)
+
             
             return None
     
 
-    def _extract_basic_data_from_text(self, pdf_text: str, email_metadata: Dict[str, Any] = None) -> Optional[InvoiceData]:
-        """
-        Extrae datos básicos directamente del texto del PDF usando regex.
-        
-        Esta función sirve como fallback cuando OpenAI falla.
-        
-        Args:
-            pdf_text: Texto extraído del PDF
-            email_metadata: Metadatos del email
-            
-        Returns:
-            InvoiceData con datos básicos extraídos o None si falla
-        """
-        try:
-            logger.info("🔧 Extrayendo datos básicos del texto PDF")
-            
-            # Diccionario para datos extraídos
-            data = {
-                "fecha": None,
-                "numero_factura": "",
-                "ruc_emisor": "",
-                "nombre_emisor": "",
-                "condicion_venta": "CONTADO",
-                "subtotal_exentas": 0,
-                "subtotal_5": 0,
-                "iva_5": 0,
-                "subtotal_10": 0,
-                "iva_10": 0,
-                "monto_total": 0,
-                "timbrado": "",
-                "cdc": "",
-                "moneda": "PYG"
-            }
-            
-            # Buscar CDC (44 dígitos)
-            cdc_match = re.search(r'\b(\d{44})\b', pdf_text)
-            if cdc_match:
-                data["cdc"] = cdc_match.group(1)
-                logger.info(f"🔧 CDC encontrado: {data['cdc']}")
-            
-            # Buscar RUC (formato X{7,8}-X)
-            ruc_match = re.search(r'\b(\d{7,8}-\d)\b', pdf_text)
-            if ruc_match:
-                data["ruc_emisor"] = ruc_match.group(1)
-                logger.info(f"🔧 RUC encontrado: {data['ruc_emisor']}")
-            
-            # Buscar fecha (varios formatos)
-            fecha_patterns = [
-                r'\b(\d{1,2})[/-](\d{1,2})[/-](\d{4})\b',  # DD/MM/YYYY
-                r'\b(\d{4})[/-](\d{1,2})[/-](\d{1,2})\b',  # YYYY/MM/DD
-                r'(\d{1,2})\s+de\s+\w+\s+de\s+(\d{4})',   # DD de MONTH de YYYY
-            ]
-            
-            for pattern in fecha_patterns:
-                fecha_match = re.search(pattern, pdf_text, re.IGNORECASE)
-                if fecha_match:
-                    try:
-                        # Determinar formato y parsear
-                        grupos = fecha_match.groups()
-                        if len(grupos) == 3:
-                            if len(grupos[0]) == 4:  # YYYY first
-                                fecha_str = f"{grupos[0]}-{grupos[1].zfill(2)}-{grupos[2].zfill(2)}"
-                            else:  # DD first
-                                fecha_str = f"{grupos[2]}-{grupos[1].zfill(2)}-{grupos[0].zfill(2)}"
-                            
-                            from app.utils.date_utils import try_parse_date
-                            fecha_parsed = try_parse_date(fecha_str)
-                            if fecha_parsed:
-                                data["fecha"] = fecha_parsed
-                                logger.info(f"🔧 Fecha encontrada: {fecha_str}")
-                                break
-                    except Exception as e:
-                        logger.warning(f"🔧 Error parseando fecha: {e}")
-                        continue
-            
-            # Buscar montos (buscar números con formato monetario)
-            total_patterns = [
-                r'total[:\s]*[\w\s]*?(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})?)',
-                r'(?:gs|₲)[:\s]*(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})?)',
-                r'(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})?)\s*(?:gs|₲)',
-            ]
-            
-            for pattern in total_patterns:
-                total_match = re.search(pattern, pdf_text, re.IGNORECASE)
-                if total_match:
-                    try:
-                        monto_str = total_match.group(1).replace(',', '').replace('.', '')
-                        # Asumir que los últimos 2 dígitos son centavos si el número es grande
-                        if len(monto_str) > 4:
-                            monto = float(monto_str[:-2] + '.' + monto_str[-2:])
-                        else:
-                            monto = float(monto_str)
-                        
-                        if monto > 0:
-                            data["monto_total"] = monto
-                            data["subtotal_exentas"] = monto  # Asumir exento por defecto
-                            logger.info(f"🔧 Monto total encontrado: {monto}")
-                            break
-                    except (ValueError, IndexError) as e:
-                        logger.warning(f"🔧 Error parseando monto: {e}")
-                        continue
-            
-            # Buscar timbrado
-            timbrado_match = re.search(r'timbrado[:\s]*(\d+)', pdf_text, re.IGNORECASE)
-            if timbrado_match:
-                data["timbrado"] = timbrado_match.group(1)
-                logger.info(f"🔧 Timbrado encontrado: {data['timbrado']}")
-            
-            # Buscar número de factura
-            factura_patterns = [
-                r'factura[:\s]*(\d{3}-\d{3}-\d{7})',
-                r'n[úu]mero[:\s]*(\d{3}-\d{3}-\d{7})',
-                r'(\d{3}-\d{3}-\d{7})',
-            ]
-            
-            for pattern in factura_patterns:
-                factura_match = re.search(pattern, pdf_text, re.IGNORECASE)
-                if factura_match:
-                    data["numero_factura"] = factura_match.group(1)
-                    logger.info(f"🔧 Número factura encontrado: {data['numero_factura']}")
-                    break
-            
-            # Crear factura con datos extraídos
-            invoice = InvoiceData.from_dict(data, email_metadata)
-            if invoice:
-                logger.info("✅ Datos básicos extraídos exitosamente del texto")
-                # Intentar mejora con CDC si está disponible
-                if data.get("cdc"):
-                    return self._enhance_basic_invoice_with_cdc(invoice)
-                return invoice
-            else:
-                logger.warning("⚠️ No se pudo crear factura con datos básicos")
-                return None
-                
-        except Exception as e:
-            logger.error(f"❌ Error extrayendo datos básicos del texto: {e}")
-            return None
-    
     # =========================================================================
     # UTILIDADES DE DETECCIÓN Y CONVERSIÓN
     # =========================================================================
@@ -754,7 +612,7 @@ Debes devolver el siguiente JSON:
             # --- Primera opción: extraer texto directamente con PyPDF2 ---
             reader = PdfReader(pdf_path)
             for page_num, page in enumerate(reader.pages):
-                text = page.extract_text_pdfminer()
+                text = page.extract_text()
                 if text and text.strip():
                     logger.info(f"✅ Texto extraído en página {page_num + 1} con PyPDF2 ({len(text)} caracteres)")
                     return True
@@ -1059,7 +917,7 @@ Debes devolver el siguiente JSON:
   "ruc_cliente": "número",
   "nombre_cliente": "nombre completo",
   "email_cliente": null,
-  "moneda": "PYG",
+  "moneda": "GS",
   "actividad_economica": "descripción",
 
   "empresa": {
@@ -1155,7 +1013,7 @@ Debes devolver un JSON con esta estructura:
   "ruc_cliente": "número",
   "nombre_cliente": "nombre completo",
   "email_cliente": null,
-  "moneda": "PYG",
+  "moneda": "GS",
   "actividad_economica": "descripción",
 
   "empresa": {
@@ -1274,116 +1132,7 @@ Debes devolver un JSON con esta estructura:
         except Exception as e:
             logger.error(f"❌ Error validando contra CDC: {str(e)}")
             return invoice
-    
-    # =========================================================================
-    # SISTEMA DE FALLBACK - FACTURAS BÁSICAS
-    # =========================================================================
-    
-    def _create_basic_invoice_from_filename(self, pdf_path: str, email_metadata: Dict[str, Any] = None) -> InvoiceData:
-        """
-        Crea factura básica cuando OpenAI no puede procesar el PDF.
-        
-        Extrae información disponible del filename y CDC.
-        
-        Args:
-            pdf_path: Ruta al PDF
-            email_metadata: Metadatos del email
-            
-        Returns:
-            InvoiceData básica para revisión manual
-        """
-        try:
-            filename = os.path.basename(pdf_path)
-            logger.info(f"🔧 Creando factura básica desde: {filename}")
-            
-            # Extraer CDC del filename (44 dígitos consecutivos)
-            cdc_match = re.search(r'(\d{44})', filename)
-            cdc = cdc_match.group(1) if cdc_match else ""
-            
-            # Extraer número de factura (formato XXX-XXX-XXXXXXX)
-            factura_match = re.search(r'(\d{3}-\d{3}-\d{7})', filename)
-            numero_factura = factura_match.group(1) if factura_match else ""
-            
-            # Estructura básica para factura no procesable
-            basic_data = self._get_basic_invoice_structure(numero_factura, cdc)
-            
-            invoice = InvoiceData.from_dict(basic_data, email_metadata)
-            
-            # Agregar path para extracción posterior de nombre real
-            setattr(invoice, 'pdf_path', pdf_path)
-            
-            logger.info(f"🔧 Factura básica creada: {numero_factura} - CDC: {cdc}")
-            return invoice
-            
-        except Exception as e:
-            logger.error(f"❌ Error creando factura básica: {str(e)}")
-            return None
-
-    def _get_basic_invoice_structure(self, numero_factura: str, cdc: str) -> dict:
-        """
-        Retorna estructura básica para facturas no procesables.
-        
-        Args:
-            numero_factura: Número extraído del filename
-            cdc: CDC extraído del filename
-            
-        Returns:
-            dict: Estructura básica de factura
-        """
-        return {
-            "fecha": datetime.now().strftime("%Y-%m-%d"),
-            "numero_factura": numero_factura,
-            "ruc_emisor": "",
-            "nombre_emisor": "FACTURA NO PROCESABLE - REVISAR MANUALMENTE",
-            "condicion_venta": "CONTADO",
-            "subtotal_exentas": 0,
-            "subtotal_5": 0,
-            "iva_5": 0,
-            "subtotal_10": 0,
-            "iva_10": 0,
-            "monto_total": 0,
-            "timbrado": "",
-            "cdc": cdc,
-            "ruc_cliente": "",
-            "nombre_cliente": "",
-            "email_cliente": "",
-            "moneda": "PYG",
-            "actividad_economica": "",
-            "empresa": {
-                "nombre": "FACTURA NO PROCESABLE",
-                "ruc": "",
-                "direccion": "",
-                "telefono": "",
-                "actividad_economica": ""
-            },
-            "timbrado_data": {
-                "nro": "",
-                "fecha_inicio_vigencia": "",
-                "valido_hasta": None
-            },
-            "factura_data": {
-                "contado_nro": numero_factura,
-                "fecha": datetime.now().strftime("%Y-%m-%d"),
-                "caja_nro": "",
-                "cdc": cdc,
-                "condicion_venta": "CONTADO"
-            },
-            "productos": [],
-            "totales": {
-                "cantidad_articulos": 0,
-                "subtotal": 0,
-                "total_a_pagar": 0,
-                "iva_0%": 0,
-                "iva_5%": 0,
-                "iva_10%": 0,
-                "total_iva": 0
-            },
-            "cliente": {
-                "nombre": "",
-                "ruc": "",
-                "email": ""
-            }
-        }
+   
 
     def _enhance_basic_invoice_with_cdc(self, invoice: InvoiceData) -> InvoiceData:
         """

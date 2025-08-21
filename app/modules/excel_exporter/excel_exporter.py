@@ -92,6 +92,10 @@ class ExcelExporterASCONT:
         grouped = {}
         
         for invoice in invoices:
+            
+            if not invoice or not isinstance(invoice, InvoiceData):
+                continue
+            
             self._recalcular_totales_desde_productos(invoice)
             # Obtener mes de la factura
             if hasattr(invoice, 'mes_proceso') and invoice.mes_proceso:
@@ -605,12 +609,13 @@ class ExcelExporterASCONT:
 
     def _recalcular_totales_desde_productos(self, invoice: InvoiceData):
         """
-        Recalcula subtotales e IVA a partir de los productos si los campos vienen vacíos o están incorrectos.
+        Recalcula subtotales e IVA a partir de los productos **solo si los campos vienen vacíos o en 0**.
         """
         if not invoice.productos:
             return
 
         try:
+            # Recalcular subtotales siempre (es seguro)
             invoice.subtotal_exentas = sum(
                 p.total for p in invoice.productos if int(p.iva or 0) == 0
             )
@@ -620,8 +625,14 @@ class ExcelExporterASCONT:
             invoice.subtotal_10 = sum(
                 p.total for p in invoice.productos if int(p.iva or 0) == 10
             )
-            invoice.iva_5 = round(invoice.subtotal_5 * 5 / 105)
-            invoice.iva_10 = round(invoice.subtotal_10 * 10 / 110)
+
+            # Solo recalcular IVA si vino vacío o en 0
+            if invoice.iva_5 in (None, 0):
+                invoice.iva_5 = round(invoice.subtotal_5 * 5 / 105)
+
+            if invoice.iva_10 in (None, 0):
+                invoice.iva_10 = round(invoice.subtotal_10 * 10 / 110)
+
         except Exception as e:
             logger.error(f"❌ Error al recalcular totales desde productos: {e}")
 
