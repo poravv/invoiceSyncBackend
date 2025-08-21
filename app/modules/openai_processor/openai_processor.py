@@ -23,14 +23,20 @@ import base64
 import logging
 from typing import Dict, Any, Optional
 from datetime import datetime
+import pytesseract
+from PIL import Image
+import pdfplumber
 
 import openai
 import fitz  # PyMuPDF
 from PyPDF2 import PdfReader
-from pdfminer.high_level import extract_text
+import io
 
 from app.config.settings import settings
 from app.models.models import InvoiceData
+
+from pdfminer.high_level import extract_text as extract_text_pdfminer
+
 
 logger = logging.getLogger(__name__)
 
@@ -107,94 +113,113 @@ class OpenAIProcessor:
 
     def _process_as_text(self, pdf_path: str, email_metadata: Dict[str, Any] = None) -> Optional[InvoiceData]:
         """
-        Procesa PDF extrayendo texto y enviándolo a OpenAI.
-
+        Procesa PDF extrayendo texto (directo o con OCR) y enviándolo a OpenAI.
+        
         Args:
-            pdf_path: Ruta al PDF
+            pdf_path: Ruta al archivo PDF
             email_metadata: Metadatos del email
-
+            
         Returns:
-            InvoiceData procesada o None si falla
+            InvoiceData o None
         """
         try:
-            logger.info("📄 Procesando PDF como TEXTO")
+            logger.info("📄 Iniciando procesamiento del PDF como TEXTO")
 
-            # PASO 1: Extraer texto del PDF con manejo de errores robusto
-            logger.info("📄 PASO 1: Iniciando extracción de texto del PDF")
+            # === PASO 1: Extraer texto del PDF ===
+            pdf_text = ""
+
+            # === INTENTO 1: pdfplumber ===
             try:
-                from pdfminer.high_level import extract_text
-                pdf_text = extract_text(pdf_path)
-                logger.info(f"📄 PASO 1a: extract_text completado, tipo resultado: {type(pdf_text)}")
-
-                if isinstance(pdf_text, list):
-                    logger.warning(f"📄 PASO 1b: extract_text devolvió lista con {len(pdf_text)} elementos")
-                    logger.info(f"📄 PASO 1b: Elementos de la lista: {pdf_text[:3]}...")
-                    pdf_text = " ".join(str(item) for item in pdf_text if item)
-                    logger.info(f"📄 PASO 1b: Lista combinada exitosamente")
-
-                pdf_text = str(pdf_text).strip()
-                logger.info(f"📄 PASO 1c: Texto convertido a string y limpiado")
-
+                logger.info("📄 Intentando con pdfplumber...")
+                import pdfplumber
+                with pdfplumber.open(pdf_path) as pdf:
+                    for page in pdf.pages:
+                        pdf_text += page.extract_text() or ""
+                pdf_text = pdf_text.strip()
+                if pdf_text:
+                    logger.info(f"✅ pdfplumber extrajo {len(pdf_text)} caracteres")
             except Exception as e:
-                logger.warning(f"📄 PASO 1 ERROR con pdfminer: {e}. Aplicando fallback con PyMuPDF")
-                import fitz  # PyMuPDF
+                logger.warning(f"⚠️ Falló pdfplumber: {e}")
+
+            # === INTENTO 2: pdfminer (solo si pdf_text está vacío) ===
+            if not pdf_text:
                 try:
-                    doc = fitz.open(pdf_path)
-                    pdf_text = ""
-                    for page in doc:
-                        pdf_text += page.get_text()
-                    pdf_text = pdf_text.strip()
-                    doc.close()
-                    logger.info(f"📄 PASO 1d: Fallback con PyMuPDF completado - {len(pdf_text)} caracteres")
-                except Exception as e2:
-                    logger.error(f"📄 PASO 1 ERROR CRÍTICO en PyMuPDF: {e2}")
-                    import traceback
-                    logger.error(f"📄 PASO 1 ERROR traceback: {traceback.format_exc()}")
-                    return None
+                    logger.info("📄 Intentando con pdfminer...")
+                    pdf_text = extract_text_pdfminer(pdf_path).strip()
+                    if pdf_text:
+                        logger.info(f"✅ pdfminer extrajo {len(pdf_text)} caracteres")
+                except Exception as e:
+                    logger.warning(f"⚠️ Falló pdfminer: {e}")
+
+            # === INTENTO 3: PyMuPDF (solo si pdf_text sigue vacío) ===
+            if not pdf_text:
+                try:
+                    logger.info("📄 Intentando con PyMuPDF...")
+                    with fitz.open(pdf_path) as doc:
+                        pdf_text = "".join([page.get_text() for page in doc]).strip()
+                    if pdf_text:
+                        logger.info(f"✅ PyMuPDF extrajo {len(pdf_text)} caracteres")
+                except Exception as e:
+                    logger.warning(f"⚠️ Falló PyMuPDF: {e}")
+
+            # === INTENTO 4: OCR (solo si pdf_text sigue vacío) ===
+            if not pdf_text:
+                try:
+                    logger.info("📄 Intentando OCR con PyMuPDF + Tesseract...")
+                    with fitz.open(pdf_path) as doc:
+                        page = doc[0]
+                        pix = page.get_pixmap(matrix=fitz.Matrix(3, 3), alpha=False)
+                        img_bytes = pix.tobytes("png")
+                        img = Image.open(io.BytesIO(img_bytes))
+                        pdf_text = pytesseract.image_to_string(img, lang="spa").strip()
+                    logger.info(f"✅ OCR extrajo {len(pdf_text)} caracteres")
+                except Exception as e:
+                    logger.error(f"❌ OCR falló: {e}")
 
             if not pdf_text:
-                logger.warning("📄 PASO 1 FALLO: No se pudo extraer texto del PDF")
+                logger.warning("📄 No se pudo extraer texto del PDF con ningún método")
+                return None
+            # === FILTRO PARA DESCARTAR NOTAS DE REMISIÓN ===
+            remision_keywords = ["nota de remisión", "remisión electrónica", "nota de entrega", "remisión de mercaderías"]
+            if any(kw in pdf_text.lower() for kw in remision_keywords):
+                logger.warning("📄 Documento detectado como Nota de Remisión. Se omite del procesamiento.")
                 return None
 
-            logger.info(f"📄 PASO 1 ÉXITO: Texto extraído - {len(pdf_text)} caracteres")
-            logger.info(f"📄 PASO 1 MUESTRA: '{pdf_text[:200]}...'")
+            logger.info(f"📄 Texto extraído para prompt: {pdf_text[:300]}...")
 
-            # PASO 2: Construir prompt y enviar a OpenAI
-            logger.info("📄 PASO 2: Construyendo prompt para OpenAI")
+            # === PASO 2: Construir prompt y consultar OpenAI ===
             prompt = self._build_text_prompt(pdf_text)
-            logger.info(f"📄 PASO 2a: Prompt construido - {len(prompt)} caracteres")
-
             messages = [{"role": "user", "content": prompt}]
-            logger.info("📄 PASO 2b: Enviando request a OpenAI...")
 
+            logger.info("🤖 Enviando solicitud a OpenAI...")
             response = openai.ChatCompletion.create(
                 model="gpt-4o",
                 messages=messages,
                 max_tokens=1000,
                 temperature=0.3
             )
-
             raw_output = response.choices[0].message.content
-            logger.info(f"📄 PASO 2 ÉXITO: Respuesta OpenAI recibida - {len(raw_output)} caracteres")
-            logger.info(f"📄 PASO 2 RESPUESTA COMPLETA: {raw_output}")
+            logger.info(f"🤖 Respuesta OpenAI recibida: {len(raw_output)} caracteres")
+            logger.debug(f"🔎 OpenAI Response Preview: {raw_output}...")
 
-            # PASO 3: Procesar respuesta con validación mejorada
-            logger.info("📄 PASO 3: Procesando respuesta de OpenAI")
-            result = self._process_openai_response(raw_output, email_metadata, fallback_text=pdf_text)
-
-            if result:
-                logger.info("📄 PASO 3 ÉXITO: Procesamiento de texto completado exitosamente")
-                logger.info(f"📄 PASO 3 RESULTADO: RUC={getattr(result, 'ruc_emisor', 'N/A')}, Nombre={getattr(result, 'nombre_emisor', 'N/A')}")
-            else:
-                logger.warning("📄 PASO 3 FALLO: _process_openai_response devolvió None")
-
-            return result
+            # === PASO 3: Procesar la respuesta JSON ===
+            try:
+                result = self._process_openai_response(raw_output, email_metadata, fallback_text=pdf_text)
+                if result:
+                    logger.info("✅ Resultado procesado exitosamente desde respuesta de OpenAI")
+                    return result
+                else:
+                    raise ValueError("OpenAI devolvió respuesta vacía o inválida")
+            except Exception as e:
+                logger.warning(f"⚠️ Fallo procesando JSON con from_dict: {e}")
+                invoice = InvoiceData()
+                invoice.observacion = f"Respuesta parcial OpenAI:\n{raw_output}"
+                logger.info("✅ Guardando respuesta parcial en observación")
+                return invoice
 
         except Exception as e:
-            logger.error(f"📄 ERROR GENERAL en procesamiento de texto: {str(e)}")
-            logger.error(f"📄 ERROR GENERAL tipo: {type(e)}")
-            import traceback
-            logger.error(f"📄 ERROR GENERAL traceback: {traceback.format_exc()}")
+            logger.error(f"❌ Error general en _process_as_text: {e}")
+            logger.error(traceback.format_exc())
             return None
 
     def _process_as_image(self, pdf_path: str, email_metadata: Dict[str, Any] = None) -> Optional[InvoiceData]:
@@ -273,6 +298,7 @@ class OpenAIProcessor:
 
             # Crear factura desde datos de OpenAI
             invoice = InvoiceData.from_dict(json_data, email_metadata)
+            
             if invoice is None:
                 raise ValueError("El resultado de from_dict fue None")
 
@@ -346,9 +372,9 @@ class OpenAIProcessor:
             str: Prompt optimizado para OpenAI Vision
         """
         return """
-Analiza esta imagen de factura paraguaya con EXTREMO CUIDADO. Lee todos los textos visibles, incluso si están escritos a mano o son difíciles de leer.
+Analiza con extrema atención la imagen de una factura paraguaya. Tu objetivo es extraer datos 100% fieles al contenido visible en la imagen, sin hacer suposiciones ni cálculos automáticos.
 
-Extrae TODOS los siguientes campos en formato JSON:
+Debes devolver el siguiente JSON:
 
 {
   "fecha": "YYYY-MM-DD",
@@ -356,14 +382,14 @@ Extrae TODOS los siguientes campos en formato JSON:
   "ruc_emisor": "XXXXXXXX-X",
   "nombre_emisor": "Razón social completa",
   "condicion_venta": "CONTADO",
-  
+
   "subtotal_exentas": 0,
   "subtotal_5": 0,
   "iva_5": 0,
   "subtotal_10": 0,
   "iva_10": 0,
   "monto_total": 0,
-  
+
   "timbrado": "número",
   "cdc": "44 dígitos",
   "ruc_cliente": "número",
@@ -396,7 +422,8 @@ Extrae TODOS los siguientes campos en formato JSON:
       "articulo": "descripción completa del producto",
       "cantidad": 1,
       "precio_unitario": 0,
-      "total": 0
+      "total": 0,
+      "iva": 0
     }
   ],
   "totales": {
@@ -415,26 +442,21 @@ Extrae TODOS los siguientes campos en formato JSON:
   }
 }
 
-🔍 INSTRUCCIONES ESPECÍFICAS PARA IMAGEN:
+📌 INSTRUCCIONES CRÍTICAS:
 
-1. LEE CUIDADOSAMENTE toda la tabla de productos/servicios
-2. BUSCA los precios unitarios y totales de cada producto
-3. Si NO encuentras columnas específicas de "IVA 5%" o "IVA 10%", entonces:
-   - Coloca TODOS los montos en "subtotal_exentas"
-   - El "monto_total" debe ser igual a "subtotal_exentas"
-   - Deja en 0 los campos de IVA 5% y 10%
+1. 📋 LEE CADA FILA DE LA TABLA DE PRODUCTOS O SERVICIOS.
+2. 🔍 Si la tabla tiene columna de IVA (Ej: "IVA %", "IVA 5%", "IVA 10%"), entonces:
+   - Usa ese valor exacto para determinar el tipo de IVA.
+   - Calcula el subtotal por cada tipo (5%, 10%, exento) sumando solo los productos con ese tipo de IVA.
+3. ⚠️ Si **NO HAY columna de IVA visible**:
+   - Supón que **todos los productos son exentos**.
+   - Registra el total en `subtotal_exentas` y pon `iva_5`, `iva_10` en 0.
+4. ✅ Incluye **el campo `iva` por producto** como 0, 5 o 10 según se indique explícitamente en la factura.
+5. 🚫 **NO infieras el tipo de IVA** basándote en nombres de productos o montos. Solo usá la información visual explícita.
+6. 🧮 El campo `monto_total` debe coincidir exactamente con el valor impreso en la factura. Si hay diferencia, incluye observación textual.
+7. 🧾 Todos los campos de montos deben estar en guaraníes (`PYG`) sin realizar conversiones.
 
-4. Si SÍ encuentras columnas de IVA, distribúyelos correctamente
-
-5. SUMA todos los productos para verificar el total
-
-6. Lee nombres y RUCs con MÁXIMO CUIDADO, incluso si están borrosos
-
-7. NO inventes datos que no puedas ver claramente
-
-8. Si algo no es legible, coloca null o 0 según corresponda
-
-IMPORTANTE: Esta factura podría NO tener IVA (ser 100% exenta). En ese caso, todos los montos van en "subtotal_exentas" y "monto_total".
+🎯 Tu prioridad es preservar la estructura, los valores visibles y evitar asumir o interpretar campos. Si no se ve, pon null o 0.
 """
 
     def _process_openai_response(self, raw_output: str, email_metadata: Dict[str, Any] = None, fallback_text: str = None) -> Optional[InvoiceData]:
@@ -452,7 +474,7 @@ IMPORTANTE: Esta factura podría NO tener IVA (ser 100% exenta). En ese caso, to
         try:
             logger.info("🔄 PASO 3: INICIANDO procesamiento de respuesta OpenAI")
             logger.info(f"🔄 PASO 3a: Respuesta recibida - longitud: {len(raw_output)} caracteres")
-            logger.info(f"🔄 PASO 3a: Primeros 300 chars: '{raw_output[:300]}...'")
+            logger.info(f"🔄 PASO 3a: Primeros 300 chars: '{raw_output}...'")
             
             # PASO 3.1: Verificar si OpenAI rechazó el procesamiento
             logger.info("🔄 PASO 3.1: Verificando si OpenAI rechazó el procesamiento")
@@ -488,17 +510,30 @@ IMPORTANTE: Esta factura podría NO tener IVA (ser 100% exenta). En ese caso, to
                 if field in json_data:
                     logger.info(f"🔄 PASO 3.2 {field}: {json_data[field]}")
 
-            # PASO 3.3: Crear factura desde datos de OpenAI
+            
+            
             logger.info("🔄 PASO 3.3: Creando factura desde datos de OpenAI")
-            invoice = InvoiceData.from_dict(json_data, email_metadata)
+            # PASO 3.3: Crear factura desde datos de OpenAI
+            #invoice = InvoiceData.from_dict(json_data, email_metadata)
+            try:
+                invoice = InvoiceData.from_dict(json_data, email_metadata)
+            except Exception as e:
+                logger.warning(f"❌ from_dict falló: {e}")
+                invoice = InvoiceData()
+                invoice.observacion = f"Extracción parcial: {json.dumps(json_data, ensure_ascii=False)}"
+                # Aquí podés asignar manualmente campos clave si están disponibles
+                for campo in ['ruc_emisor', 'nombre_emisor', 'fecha', 'monto_total']:
+                    if campo in json_data:
+                        setattr(invoice, campo, json_data[campo])
             logger.info(f"🔄 PASO 3.3a: from_dict completado, resultado: {type(invoice)}")
             
-            if invoice is None:
-                logger.warning("⚠️ PASO 3.3 FALLO: from_dict devolvió None")
-                if fallback_text:
-                    logger.info("🔧 PASO 3.3 FALLBACK: Extrayendo datos básicos del texto")
-                    return self._extract_basic_data_from_text(fallback_text, email_metadata)
-                raise ValueError("El resultado de from_dict fue None")
+            # Se comenta para evitar carga generica de informacion 
+            # if invoice is None:
+            #     logger.warning("⚠️ PASO 3.3 FALLO: from_dict devolvió None")
+            #     if fallback_text:
+            #         logger.info("🔧 PASO 3.3 FALLBACK: Extrayendo datos básicos del texto")
+            #         return self._extract_basic_data_from_text(fallback_text, email_metadata)
+            #     raise ValueError("El resultado de from_dict fue None")
 
             logger.info("✅ PASO 3.3 ÉXITO: Factura creada exitosamente")
             logger.info(f"🔄 PASO 3.3 FACTURA: RUC={getattr(invoice, 'ruc_emisor', 'N/A')}, Nombre={getattr(invoice, 'nombre_emisor', 'N/A')}")
@@ -520,7 +555,7 @@ IMPORTANTE: Esta factura podría NO tener IVA (ser 100% exenta). En ese caso, to
         except Exception as e:
             logger.error(f"❌ PASO 3 ERROR GENERAL procesando respuesta OpenAI: {str(e)}")
             logger.error(f"❌ PASO 3 ERROR GENERAL tipo: {type(e)}")
-            logger.error(f"❌ PASO 3 ERROR GENERAL respuesta problemática: '{raw_output[:200]}...'")
+            logger.error(f"❌ PASO 3 ERROR GENERAL respuesta problemática: '{raw_output}...'")
             import traceback
             logger.error(f"❌ PASO 3 ERROR GENERAL traceback: {traceback.format_exc()}")
             
@@ -530,6 +565,7 @@ IMPORTANTE: Esta factura podría NO tener IVA (ser 100% exenta). En ese caso, to
             
             return None
     
+
     def _extract_basic_data_from_text(self, pdf_text: str, email_metadata: Dict[str, Any] = None) -> Optional[InvoiceData]:
         """
         Extrae datos básicos directamente del texto del PDF usando regex.
@@ -674,27 +710,46 @@ IMPORTANTE: Esta factura podría NO tener IVA (ser 100% exenta). En ese caso, to
     
     def _pdf_has_extractable_text(self, pdf_path: str) -> bool:
         """
-        Determina si un PDF tiene texto extractible o es una imagen escaneada.
-        
+        Verifica si un PDF contiene texto digital directamente extraíble.
+        Si no, intenta hacer OCR en la primera página como fallback.
+
         Args:
-            pdf_path: Ruta al archivo PDF
-            
+            pdf_path (str): Ruta al archivo PDF
+
         Returns:
-            bool: True si el PDF tiene texto extractible
+            bool: True si se puede extraer texto (digital u OCR), False en caso contrario
         """
         try:
+            # --- Primera opción: extraer texto directamente con PyPDF2 ---
             reader = PdfReader(pdf_path)
-            for page in reader.pages:
+            for page_num, page in enumerate(reader.pages):
                 text = page.extract_text()
                 if text and text.strip():
-                    logger.info(f"📄 PDF tiene texto extractible: {len(text)} caracteres")
+                    logger.info(f"✅ Texto extraído en página {page_num + 1} con PyPDF2 ({len(text)} caracteres)")
                     return True
-            
-            logger.info("📄 PDF no tiene texto extractible (imagen escaneada)")
+
+            # --- Fallback: usar PyMuPDF + OCR (Tesseract) ---
+            with fitz.open(pdf_path) as doc:
+                if len(doc) == 0:
+                    logger.info("❌ Documento vacío")
+                    return False
+
+                page = doc[0]
+                pix = page.get_pixmap(matrix=fitz.Matrix(3, 3), alpha=False)
+                image_bytes = pix.tobytes("png")
+                image = Image.open(io.BytesIO(image_bytes))
+
+                text_ocr = pytesseract.image_to_string(image, lang="spa")
+
+                if text_ocr and text_ocr.strip():
+                    logger.info(f"🔍 Texto extraído por OCR: {len(text_ocr)} caracteres")
+                    return True
+
+            logger.info("🟥 No se pudo extraer texto (ni digital ni por OCR)")
             return False
-            
+
         except Exception as e:
-            logger.warning(f"⚠️ Error verificando texto en PDF: {str(e)}")
+            logger.warning(f"⚠️ Error al verificar texto en PDF: {e}")
             return False
 
     def _convert_pdf_to_image(self, pdf_path: str) -> str:
@@ -927,98 +982,91 @@ IMPORTANTE: Esta factura podría NO tener IVA (ser 100% exenta). En ese caso, to
             str: Prompt para OpenAI Vision
         """
         return """
-Analiza cuidadosamente esta factura paraguaya y extrae TODOS los siguientes campos en formato JSON estructurado. Esta información será usada para el sistema contable ASCONT, así que es MUY IMPORTANTE que extraigas los importes correctamente según las tasas de IVA:
+Analiza con extrema atención la imagen de una factura paraguaya. Tu objetivo es extraer datos 100% fieles al contenido visible en la imagen, sin hacer suposiciones ni cálculos automáticos.
+
+Debes devolver el siguiente JSON:
 
 {
   "fecha": "YYYY-MM-DD",
-  "numero_factura": "XXX-XXX-XXXXXXX (formato completo)",
-  "ruc_emisor": "XXXXXXXX-X (con guión)",
-  "nombre_emisor": "Razón social del emisor",
-  "condicion_venta": "CONTADO o CREDITO",
-  
-  "subtotal_exentas": number,
-  "subtotal_5": number,
-  "iva_5": number,
-  "subtotal_10": number,
-  "iva_10": number,
-  "monto_total": number,
-  
-  "timbrado": "string",
-  "cdc": "string",
-  "ruc_cliente": "string",
-  "nombre_cliente": "string",
-  "email_cliente": "string",
+  "numero_factura": "XXX-XXX-XXXXXXX",
+  "ruc_emisor": "XXXXXXXX-X",
+  "nombre_emisor": "Razón social completa",
+  "condicion_venta": "CONTADO",
+
+  "subtotal_exentas": 0,
+  "subtotal_5": 0,
+  "iva_5": 0,
+  "subtotal_10": 0,
+  "iva_10": 0,
+  "monto_total": 0,
+
+  "timbrado": "número",
+  "cdc": "44 dígitos",
+  "ruc_cliente": "número",
+  "nombre_cliente": "nombre completo",
+  "email_cliente": null,
   "moneda": "PYG",
-  "actividad_economica": "string",
+  "actividad_economica": "descripción",
 
   "empresa": {
-    "nombre": "string",
-    "ruc": "string",
-    "direccion": "string",
-    "telefono": "string",
-    "actividad_economica": "string"
+    "nombre": "nombre empresa",
+    "ruc": "ruc empresa", 
+    "direccion": "dirección completa",
+    "telefono": "teléfono",
+    "actividad_economica": "actividad"
   },
   "timbrado_data": {
-    "nro": "string",
+    "nro": "número timbrado",
     "fecha_inicio_vigencia": "YYYY-MM-DD",
-    "valido_hasta": "YYYY-MM-DD"
+    "valido_hasta": null
   },
   "factura_data": {
-    "contado_nro": "string",
+    "contado_nro": null,
     "fecha": "YYYY-MM-DD",
-    "caja_nro": "string",
-    "cdc": "string",
-    "condicion_venta": "CONTADO o CREDITO"
+    "caja_nro": null,
+    "cdc": "44 dígitos",
+    "condicion_venta": "CONTADO"
   },
   "productos": [
     {
-      "articulo": "string",
-      "cantidad": number,
-      "precio_unitario": number,
-      "total": number
+      "articulo": "descripción completa del producto",
+      "cantidad": 1,
+      "precio_unitario": 0,
+      "total": 0,
+      "iva": 0
     }
   ],
   "totales": {
-    "cantidad_articulos": number,
-    "subtotal": number,
-    "total_a_pagar": number,
-    "iva_0%": number,
-    "iva_5%": number,
-    "iva_10%": number,
-    "total_iva": number
+    "cantidad_articulos": 1,
+    "subtotal": 0,
+    "total_a_pagar": 0,
+    "iva_0%": 0,
+    "iva_5%": 0,
+    "iva_10%": 0,
+    "total_iva": 0
   },
   "cliente": {
-    "nombre": "string",
-    "ruc": "string",
-    "email": "string"
+    "nombre": "nombre cliente",
+    "ruc": "ruc cliente",
+    "email": null
   }
 }
 
-INSTRUCCIONES CRÍTICAS:
-- TODOS los campos son obligatorios. Si no encuentras el valor, devuelve null para texto o 0 para números
-- Los montos deben ser números sin separadores de miles ni símbolos
-- RUC debe incluir el guión (ej: "80014066-4")
-- Fechas en formato YYYY-MM-DD
-- NO uses markdown ni ```json en la respuesta
-- Extrae EXACTAMENTE los valores de cada columna de la tabla de productos
-- Separa correctamente los importes por tasa de IVA (Exentas, 5%, 10%)
+📌 INSTRUCCIONES CRÍTICAS:
 
-Ten en cuenta que:
-La factura puede estar en formato vertical u horizontal
-Algunos campos pueden estar escritos a mano
-El orden y posición de los campos puede variar
-Algunos campos pueden estar ausentes o tener nombres ligeramente diferentes
+1. 📋 LEE CADA FILA DE LA TABLA DE PRODUCTOS O SERVICIOS.
+2. 🔍 Si la tabla tiene columna de IVA (Ej: "IVA %", "IVA 5%", "IVA 10%"), entonces:
+   - Usa ese valor exacto para determinar el tipo de IVA.
+   - Calcula el subtotal por cada tipo (5%, 10%, exento) sumando solo los productos con ese tipo de IVA.
+3. ⚠️ Si **NO HAY columna de IVA visible**:
+   - Supón que **todos los productos son exentos**.
+   - Registra el total en `subtotal_exentas` y pon `iva_5`, `iva_10` en 0.
+4. ✅ Incluye **el campo `iva` por producto** como 0, 5 o 10 según se indique explícitamente en la factura.
+5. 🚫 **NO infieras el tipo de IVA** basándote en nombres de productos o montos. Solo usá la información visual explícita.
+6. 🧮 El campo `monto_total` debe coincidir exactamente con el valor impreso en la factura. Si hay diferencia, incluye observación textual.
+7. 🧾 Todos los campos de montos deben estar en guaraníes (`PYG`) sin realizar conversiones.
 
-Busca específicamente:
-- Información de la empresa: nombre completo, RUC, dirección y teléfono (pueden estar en el encabezado o pie)
-- Datos del timbrado: número, fechas de vigencia (suelen estar en la parte superior)
-- Número de factura y fecha (pueden estar en cualquier parte superior)
-- Productos/servicios: descripción, cantidad, precio unitario y total
-- Totales: subtotal, IVA (discriminado en 0%, 5%, 10%), total a pagar
-- Información del cliente: nombre y RUC (pueden estar al inicio o al final)
-
-Si encuentras campos escritos a mano, intenta interpretarlos lo mejor posible.
-Si no puedes leer algo con certeza, déjalo en blanco.
+🎯 Tu prioridad es preservar la estructura, los valores visibles y evitar asumir o interpretar campos. Si no se ve, pon null o 0.
 """
         #return self._get_base_prompt()
     
@@ -1030,91 +1078,90 @@ Si no puedes leer algo con certeza, déjalo en blanco.
             str: Prompt base con formato JSON requerido
         """
         return """
-Analiza cuidadosamente esta factura paraguaya y extrae TODOS los siguientes campos en formato JSON estructurado. Esta información será usada para el sistema contable ASCONT, así que es MUY IMPORTANTE que extraigas los importes correctamente según las tasas de IVA:
+Analiza cuidadosamente el siguiente contenido textual de una factura electrónica paraguaya. Tu tarea es extraer los datos con la **máxima fidelidad posible**, sin asumir ni calcular montos que no estén explícitamente especificados.
+
+Debes devolver un JSON con esta estructura:
 
 {
   "fecha": "YYYY-MM-DD",
-  "numero_factura": "XXX-XXX-XXXXXXX (formato completo)",
-  "ruc_emisor": "XXXXXXXX-X (con guión)",
-  "nombre_emisor": "Razón social del emisor",
-  "condicion_venta": "CONTADO o CREDITO",
-  
-  "subtotal_exentas": number,
-  "subtotal_5": number,
-  "iva_5": number,
-  "subtotal_10": number,
-  "iva_10": number,
-  "monto_total": number,
-  
-  "timbrado": "string",
-  "cdc": "string",
-  "ruc_cliente": "string",
-  "nombre_cliente": "string",
-  "email_cliente": "string",
+  "numero_factura": "XXX-XXX-XXXXXXX",
+  "ruc_emisor": "XXXXXXXX-X",
+  "nombre_emisor": "Razón social completa",
+  "condicion_venta": "CONTADO",
+
+  "subtotal_exentas": 0,
+  "subtotal_5": 0,
+  "iva_5": 0,
+  "subtotal_10": 0,
+  "iva_10": 0,
+  "monto_total": 0,
+
+  "timbrado": "número",
+  "cdc": "44 dígitos",
+  "ruc_cliente": "número",
+  "nombre_cliente": "nombre completo",
+  "email_cliente": null,
   "moneda": "PYG",
-  "actividad_economica": "string",
+  "actividad_economica": "descripción",
 
   "empresa": {
-    "nombre": "string",
-    "ruc": "string",
-    "direccion": "string",
-    "telefono": "string",
-    "actividad_economica": "string"
+    "nombre": "nombre empresa",
+    "ruc": "ruc empresa", 
+    "direccion": "dirección completa",
+    "telefono": "teléfono",
+    "actividad_economica": "actividad"
   },
   "timbrado_data": {
-    "nro": "string",
+    "nro": "número timbrado",
     "fecha_inicio_vigencia": "YYYY-MM-DD",
-    "valido_hasta": "YYYY-MM-DD"
+    "valido_hasta": null
   },
   "factura_data": {
-    "contado_nro": "string",
+    "contado_nro": null,
     "fecha": "YYYY-MM-DD",
-    "caja_nro": "string",
-    "cdc": "string",
-    "condicion_venta": "CONTADO o CREDITO"
+    "caja_nro": null,
+    "cdc": "44 dígitos",
+    "condicion_venta": "CONTADO"
   },
   "productos": [
     {
-      "articulo": "string",
-      "cantidad": number,
-      "precio_unitario": number,
-      "total": number
+      "articulo": "descripción completa del producto",
+      "cantidad": 1,
+      "precio_unitario": 0,
+      "total": 0,
+      "iva": 0
     }
   ],
   "totales": {
-    "cantidad_articulos": number,
-    "subtotal": number,
-    "total_a_pagar": number,
-    "iva_0%": number,
-    "iva_5%": number,
-    "iva_10%": number,
-    "total_iva": number
+    "cantidad_articulos": 1,
+    "subtotal": 0,
+    "total_a_pagar": 0,
+    "iva_0%": 0,
+    "iva_5%": 0,
+    "iva_10%": 0,
+    "total_iva": 0
   },
   "cliente": {
-    "nombre": "string",
-    "ruc": "string",
-    "email": "string"
+    "nombre": "nombre cliente",
+    "ruc": "ruc cliente",
+    "email": null
   }
 }
 
-⚠️ INSTRUCCIONES CRÍTICAS PARA MONTOS:
-- Si la factura NO tiene IVA 5% ni IVA 10%, pero sí tiene un monto total, coloca ese monto en "subtotal_exentas" y "monto_total"
-- Si encuentras productos con precios, súmalos correctamente y distribúyelos según la tasa de IVA aplicable
-- Los montos deben ser números sin separadores de miles ni símbolos
-- RUC debe incluir el guión (ej: "80014066-4")
-- Fechas en formato YYYY-MM-DD
-- NO uses markdown ni ```json en la respuesta
-- Si "condicion_venta" no está clara, usa "CONTADO"
+📌 INSTRUCCIONES CLAVE PARA EL ANÁLISIS DE TEXTO:
 
-🔍 PROCESO DE EXTRACCIÓN PASO A PASO:
-1. Busca la tabla de productos/servicios
-2. Extrae cantidad, descripción, precio unitario y total de cada producto
-3. Identifica si hay columnas de IVA 5% o IVA 10%
-4. Si NO hay columnas de IVA, trata los importes como exentos
-5. Suma correctamente todos los totales
-6. Verifica que monto_total coincida con la suma de subtotales + IVA
+1. 🧾 LOCALIZA LA TABLA DE PRODUCTOS: Si hay columnas de IVA explícitas (como "IVA", "%", "5%", "10%", "Exentas"), úsalas como fuente confiable para clasificar los productos.
+2. ❌ NO infieras el tipo de IVA por nombre del producto ni realices cálculos automáticos de IVA.
+3. 🔢 LEE LOS TOTALES IMPRESOS en la parte final de la factura. Usa el "Total a pagar" como `monto_total`.
+4. ✅ Si NO hay columnas de IVA visibles ni totales discriminados por tipo:
+   - Coloca todos los productos como exentos (`iva = 0`)
+   - Suma sus montos en `subtotal_exentas`
+   - Los campos de `iva_5`, `iva_10` deben ser 0
+5. 🔐 NO modifiques ni recalcules valores. Usa los valores impresos tal como están.
+6. 📋 Incluye el campo `iva` por producto con valor 0, 5 o 10, según indique la tabla.
+7. 🧠 Si algún valor es ilegible o está ausente, coloca `null` o 0 según el caso.
 
-IMPORTANTE: Si no encuentras montos específicos de IVA 5% o IVA 10% en la tabla, pero sí hay un total general, colócalo en "subtotal_exentas" y el mismo valor en "monto_total".
+🎯 Tu prioridad es la **fidelidad exacta al texto visible de la factura** y la correcta clasificación del IVA.
 """
     
     # =========================================================================
