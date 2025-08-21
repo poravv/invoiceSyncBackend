@@ -21,6 +21,7 @@ import re
 import json
 import base64
 import logging
+import traceback
 from typing import Dict, Any, Optional
 from datetime import datetime
 import pytesseract
@@ -34,7 +35,7 @@ import io
 
 from app.config.settings import settings
 from app.models.models import InvoiceData
-
+#from pdfminer.high_level import extract_text
 from pdfminer.high_level import extract_text as extract_text_pdfminer
 
 
@@ -131,10 +132,9 @@ class OpenAIProcessor:
             # === INTENTO 1: pdfplumber ===
             try:
                 logger.info("📄 Intentando con pdfplumber...")
-                import pdfplumber
                 with pdfplumber.open(pdf_path) as pdf:
                     for page in pdf.pages:
-                        pdf_text += page.extract_text() or ""
+                        pdf_text += page.extract_text_pdfminer() or ""
                 pdf_text = pdf_text.strip()
                 if pdf_text:
                     logger.info(f"✅ pdfplumber extrajo {len(pdf_text)} caracteres")
@@ -240,29 +240,60 @@ class OpenAIProcessor:
             
             # Convertir PDF a imagen
             image_data = self._convert_pdf_to_image(pdf_path)
-            prompt = self._build_enhanced_image_prompt()
-            
-            messages = [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
-                ]
-            }]
 
-            # Enviar a OpenAI Vision con configuración optimizada
-            response = openai.ChatCompletion.create(
-                model="gpt-4o",
-                messages=messages,
-                max_tokens=1500,  # Más tokens para respuestas complejas
-                temperature=0.1   # Más determinístico para mejor precisión
-            )
+            ocr_text = self.extract_text_from_base64_image(image_data)
+            #Si extrae texto de la imagen entra aqui 
+            if ocr_text:
+                logger.info(f"🔍 Texto OCR desde imagen:\n{ocr_text[:500]}...")
+                logger.info("🤖 Enviando solicitud a OpenAI...")
+                prompt = self._build_text_prompt(ocr_text)
+                response = openai.ChatCompletion.create(
+                    model="gpt-4o",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=1000,
+                    temperature=0.3
+                )
+                raw_output = response.choices[0].message.content
+                logger.info(f"🤖 Respuesta OpenAI recibida: {len(raw_output)} caracteres")
+                logger.debug(f"🔎 OpenAI Response Preview: {raw_output}...")
 
-            raw_output = response.choices[0].message.content
-            logger.info(f"Respuesta OpenAI (imagen): {raw_output}")
-            
-            # Procesar respuesta con validaciones específicas para imágenes
-            return self._process_image_response(raw_output, email_metadata, pdf_path)
+                # === PASO 3: Procesar la respuesta JSON ===
+                try:
+                    result = self._process_openai_response(raw_output, email_metadata, fallback_text=ocr_text)
+                    if result:
+                        logger.info("✅ Resultado procesado exitosamente desde respuesta de OpenAI")
+                        return result
+                    else:
+                        raise ValueError("OpenAI devolvió respuesta vacía o inválida")
+                except Exception as e:
+                    logger.warning(f"⚠️ Fallo procesando JSON con from_dict: {e}")
+                    invoice = InvoiceData()
+                    invoice.observacion = f"Respuesta parcial OpenAI:\n{raw_output}"
+                    logger.info("✅ Guardando respuesta parcial en observación")
+                    return invoice
+            else:
+                prompt = self._build_enhanced_image_prompt()
+                messages = [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
+                    ]
+                }]
+
+                # Enviar a OpenAI Vision con configuración optimizada
+                response = openai.ChatCompletion.create(
+                    model="gpt-4o",
+                    messages=messages,
+                    max_tokens=1500,  # Más tokens para respuestas complejas
+                    temperature=0.1   # Más determinístico para mejor precisión
+                )
+
+                raw_output = response.choices[0].message.content
+                logger.info(f"Respuesta OpenAI (imagen): {raw_output}")
+                
+                # Procesar respuesta con validaciones específicas para imágenes
+                return self._process_image_response(raw_output, email_metadata, pdf_path)
 
         except Exception as e:
             logger.error(f"Error en procesamiento de imagen: {str(e)}")
@@ -723,7 +754,7 @@ Debes devolver el siguiente JSON:
             # --- Primera opción: extraer texto directamente con PyPDF2 ---
             reader = PdfReader(pdf_path)
             for page_num, page in enumerate(reader.pages):
-                text = page.extract_text()
+                text = page.extract_text_pdfminer()
                 if text and text.strip():
                     logger.info(f"✅ Texto extraído en página {page_num + 1} con PyPDF2 ({len(text)} caracteres)")
                     return True
@@ -788,6 +819,29 @@ Debes devolver el siguiente JSON:
         except Exception as e:
             logger.error(f"❌ Error convirtiendo PDF a imagen: {str(e)}")
             raise
+
+    @staticmethod
+    def extract_text_from_base64_image(base64_image: str, lang="spa") -> str:
+        """
+        Extrae texto OCR desde una imagen codificada en base64.
+
+        Args:
+            base64_image (str): Imagen codificada en base64.
+            lang (str): Idioma para Tesseract (por defecto 'spa').
+
+        Returns:
+            str: Texto extraído.
+        """
+        try:
+            logger.info("🔍 Aplicando OCR a imagen base64...")
+            image_bytes = base64.b64decode(base64_image)
+            image = Image.open(io.BytesIO(image_bytes))
+            text = pytesseract.image_to_string(image, lang=lang)
+            logger.info(f"✅ OCR completado: {len(text)} caracteres extraídos")
+            return text.strip()
+        except Exception as e:
+            logger.error(f"❌ Error al aplicar OCR a la imagen: {str(e)}")
+            return ""
     
     # =========================================================================
     # PROCESAMIENTO DE JSON Y NORMALIZACIÓN
@@ -1434,7 +1488,7 @@ Debes devolver un JSON con esta estructura:
             
             # Extraer texto completo del PDF
             try:
-                text_content = extract_text(pdf_path)
+                text_content = extract_text_pdfminer(pdf_path)
                 if isinstance(text_content, list):
                     logger.warning("🔍 extract_text devolvió lista, combinando elementos")
                     text_content = " ".join(str(item) for item in text_content if item)
