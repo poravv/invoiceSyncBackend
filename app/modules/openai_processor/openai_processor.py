@@ -133,15 +133,21 @@ class OpenAIProcessor:
                         text = page.extract_text() or ""
                         pdf_text += text + "\n"
 
-                        table = page.extract_table()
+                        table = page.extract_table({
+                            "vertical_strategy": "lines",
+                            "horizontal_strategy": "lines",
+                            "intersection_tolerance": 5
+                        })
                         if table:
                             pdf_text += "\n[TABLA DETECTADA]\n"
-                            for row in table:
-                                pdf_text += " | ".join(cell or "" for cell in row) + "\n"
+                            for row in table[1:]:  # omitimos el encabezado
+                                cleaned_row = [self.force_decimal_format(cell or "") for cell in row]
+                                pdf_text += " | ".join(cleaned_row) + "\n"
 
                 pdf_text = pdf_text.strip()
                 if pdf_text:
                     logger.info(f"✅ pdfplumber extrajo {len(pdf_text)} caracteres")
+                    logger.info(f"✅ pdfplumber: {pdf_text[:3000]}")
             except Exception as e:
                 logger.warning(f"⚠️ Falló pdfplumber: {e}")
 
@@ -225,6 +231,14 @@ class OpenAIProcessor:
             logger.error(traceback.format_exc())
             return None
 
+    def force_decimal_format(self, cell: str) -> str:
+        if not cell:
+            return ""
+        # Reemplazar formatos como "1.234,56" → "1234.56"
+        cell = cell.replace(".", "") #.replace(",", ".")
+        return cell
+    
+    
     def _process_as_image(self, pdf_path: str, email_metadata: Dict[str, Any] = None) -> Optional[InvoiceData]:
         """
         Procesa PDF convirtiéndolo a imagen y enviándolo a OpenAI Vision.
@@ -792,6 +806,7 @@ Debes devolver el siguiente JSON:
         - Campos numéricos que vienen como listas
         - CDCs con espacios
         - Strings que vienen como listas
+        - Moneda extranjera con tipo de cambio
         
         Args:
             data: Dictionary con datos crudos
@@ -817,28 +832,49 @@ Debes devolver el siguiente JSON:
                     
                     # Convertir a número
                     data[field] = self._safe_convert_to_float(value)
-            
+
             # Limpiar CDC (remover espacios)
             if 'cdc' in data and isinstance(data['cdc'], str):
                 data['cdc'] = re.sub(r'\s+', '', data['cdc'])
-            
+
             # Normalizar campos string que pueden venir como listas
             string_fields = ['numero_factura', 'ruc_emisor', 'nombre_emisor', 'fecha', 'timbrado']
             for field in string_fields:
                 if field in data and isinstance(data[field], list):
                     logger.warning(f"🔧 Campo {field} vino como lista: {data[field]}")
                     data[field] = data[field][0] if data[field] else ""
-            
+
             # Normalizar condicion_venta (puede ser null)
             if 'condicion_venta' in data:
                 if data['condicion_venta'] is None:
                     data['condicion_venta'] = "CONTADO"
                 elif isinstance(data['condicion_venta'], list):
                     data['condicion_venta'] = data['condicion_venta'][0] if data['condicion_venta'] else "CONTADO"
-                    
+
+            # === Normalizar MONEDA ===
+            if 'moneda' in data:
+                moneda = str(data['moneda']).strip().upper()
+                if moneda in ["USD", "DOLAR", "DOLLAR", "$"]:
+                    data['moneda'] = "USD"
+                elif moneda in ["PYG", "GUARANI", "GS"]:
+                    data['moneda'] = "PYG"
+                else:
+                    logger.warning(f"🔍 Moneda desconocida: {moneda}")
+                    data['moneda'] = "PYG"  # Fallback seguro
+
+            # === Normalizar TIPO DE CAMBIO ===
+            if 'tipo_cambio' in data:
+                try:
+                    data['tipo_cambio'] = float(str(data['tipo_cambio']).replace(",", "."))
+                except Exception:
+                    logger.warning(f"⚠️ Error al convertir tipo_cambio: {data['tipo_cambio']}")
+                    data['tipo_cambio'] = None
+
+            logger.info(f"JSON Normalizado: {data}")
+            data = self._autocorrect_iva_consistency(data)
             logger.info(f"JSON Normalizado: {data}")
             return data
-            
+
         except Exception as e:
             logger.error(f"❌ Error normalizando campos: {e}")
             return data
@@ -904,6 +940,7 @@ Debes devolver el siguiente JSON:
   "ruc_emisor": "XXXXXXXX-X",
   "nombre_emisor": "Razón social completa",
   "condicion_venta": "CONTADO",
+  "tipo_cambio": 7650,-> Si es USD incluye como cambio puede
 
   "subtotal_exentas": 0,
   "subtotal_5": 0,
@@ -977,8 +1014,20 @@ Debes devolver el siguiente JSON:
 5. 🚫 **NO infieras el tipo de IVA** basándote en nombres de productos o montos. Solo usá la información visual explícita.
 6. 🧮 El campo `monto_total` debe coincidir exactamente con el valor impreso en la factura. Si hay diferencia, incluye observación textual.
 7. 🧾 Todos los campos de montos deben estar en guaraníes (`PYG`) sin realizar conversiones.
-
+8.	💱 Si la factura está expresada en dólares (USD), incluye el campo "moneda": "USD" y el "tipo_cambio" si está visible en la factura.
+9.	💸 En facturas en USD, mantén los montos con decimales tal como están impresos. No conviertas a guaraníes ni redondees.
+10. Asegurate de leer correctamente filas y columnas para que los montos de iva y los totales tengan sentido 
+    ejemplo: si solo tiene iva5 debe el monto de la factura debe ir en subtotal_5.
+🧾 Si la tabla de productos no incluye una columna de IVA, debes asumir que todos los productos pertenecen al mismo tipo de IVA que aparece en el resumen "LIQUIDACIÓN IVA".
+👉 En ese caso:
+- Si solo aparece IVA al 5%, todos los productos deben tener `"iva": 5`.
+- Si solo aparece IVA al 10%, todos los productos deben tener `"iva": 10`.
+⚠️ Nunca asumas un tipo de IVA por el nombre del producto o por redondeos.
 🎯 Tu prioridad es preservar la estructura, los valores visibles y evitar asumir o interpretar campos. Si no se ve, pon null o 0.
+🧠 Si el resumen final (LIQUIDACIÓN IVA) muestra solo un tipo de IVA con monto positivo (por ejemplo, solo IVA 5%), y los demás son 0:
+➡️ Entonces TODOS los productos deben tener ese mismo tipo de IVA.
+⚠️ Si las columnas "Exentas", "5%", "10%" están presentes en la tabla de productos, debes asegurarte de que los montos vayan en la columna correspondiente. Nunca coloques montos en `subtotal_10` si el total impreso aparece bajo la columna `5%`.
+⚠️ Esto se aplica incluso si no está indicado el tipo de IVA por producto.
 """
         #return self._get_base_prompt()
     
@@ -1000,6 +1049,7 @@ Debes devolver un JSON con esta estructura:
   "ruc_emisor": "XXXXXXXX-X",
   "nombre_emisor": "Razón social completa",
   "condicion_venta": "CONTADO",
+  "tipo_cambio": 7650,-> Si es USD incluye como cambio puede
 
   "subtotal_exentas": 0,
   "subtotal_5": 0,
@@ -1072,8 +1122,23 @@ Debes devolver un JSON con esta estructura:
 5. 🔐 NO modifiques ni recalcules valores. Usa los valores impresos tal como están.
 6. 📋 Incluye el campo `iva` por producto con valor 0, 5 o 10, según indique la tabla.
 7. 🧠 Si algún valor es ilegible o está ausente, coloca `null` o 0 según el caso.
+8.	💱 Si la factura está expresada en dólares (USD), incluye el campo "moneda": "USD" y el "tipo_cambio" si está visible en la factura.
+9.	💸 En facturas en USD, mantén los montos con decimales tal como están impresos. No conviertas a guaraníes ni redondees.
+10. Asegurate de leer correctamente filas y columnas para que los montos de iva y los totales tengan sentido 
+    ejemplo: si solo tiene iva5 debe el monto de la factura debe ir en subtotal_5.
+⚠️ No infieras el valor del IVA por producto si no está explícitamente impreso al lado del ítem.
 
+🧾 Si la tabla de productos no incluye una columna de IVA, debes asumir que todos los productos pertenecen al mismo tipo de IVA que aparece en el resumen "LIQUIDACIÓN IVA".
+👉 En ese caso:
+- Si solo aparece IVA al 5%, todos los productos deben tener `"iva": 5`.
+- Si solo aparece IVA al 10%, todos los productos deben tener `"iva": 10`.
+⚠️ Nunca asumas un tipo de IVA por el nombre del producto o por redondeos.
+    
 🎯 Tu prioridad es la **fidelidad exacta al texto visible de la factura** y la correcta clasificación del IVA.
+🧠 Si el resumen final (LIQUIDACIÓN IVA) muestra solo un tipo de IVA con monto positivo (por ejemplo, solo IVA 5%), y los demás son 0:
+➡️ Entonces TODOS los productos deben tener ese mismo tipo de IVA.
+⚠️ Si las columnas "Exentas", "5%", "10%" están presentes en la tabla de productos, debes asegurarte de que los montos vayan en la columna correspondiente. Nunca coloques montos en `subtotal_10` si el total impreso aparece bajo la columna `5%`.
+⚠️ Esto se aplica incluso si no está indicado el tipo de IVA por producto.
 """
     
     # =========================================================================
@@ -1082,139 +1147,110 @@ Debes devolver un JSON con esta estructura:
     
     def _validate_and_enhance_with_cdc(self, invoice: InvoiceData) -> InvoiceData:
         """
-        Valida fecha extraída contra CDC y corrige inconsistencias.
-        
-        El CDC paraguayo contiene la fecha real de emisión, por lo que
-        es más confiable que la extracción de OpenAI.
-        
+        Valida y mejora la fecha de emisión de la factura usando el CDC (Código de Control).
+        La fecha del CDC es más confiable que la extraída por OCR o IA, ya que está codificada oficialmente.
+
+        Si la fecha de OpenAI es posterior a la del CDC o está ausente, se reemplaza por la del CDC.
+        Si el CDC no tiene una fecha válida o lógica (antes de 2020, o formato inválido), se omite la corrección.
+
         Args:
-            invoice: Factura procesada por OpenAI
-            
+            invoice (InvoiceData): Objeto con datos extraídos de la factura.
+
         Returns:
-            Factura validada y corregida si es necesario
+            InvoiceData: Factura corregida o sin modificar si el CDC no aplica.
         """
         try:
             logger.info("🔍 VALIDANDO factura contra CDC")
-            cdc = getattr(invoice, 'cdc', '')
-            
-            if not cdc or len(cdc) != 44:
-                logger.info("🔍 CDC no disponible o inválido, devolviendo sin validar")
+            cdc = getattr(invoice, 'cdc', '').replace(" ", "").strip()
+
+            if not cdc or len(cdc) != 44 or not cdc.isdigit():
+                logger.warning("❌ CDC no disponible o inválido (longitud ≠ 44 o no numérico). Omitiendo validación.")
                 return invoice
-            
-            # Extraer fecha del CDC (formato YYYYMMDD)
-            fecha_pattern = re.search(r'(20\d{2})(\d{2})(\d{2})', cdc)
-            if not fecha_pattern:
-                logger.warning(f"🔍 No se pudo extraer fecha del CDC: {cdc}")
+
+            # Extraer fecha desde posición 11 a 18 (CDC estándar paraguayo)
+            fecha_raw = cdc[10:18]  # cdc[10:18] corresponde a posiciones 11 a 18 (0-based index)
+            logger.info(f"📆 Fecha extraída cruda del CDC: {fecha_raw}")
+
+            # Validar patrón de fecha AAAAMMDD
+            if not re.match(r'20\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])', fecha_raw):
+                logger.warning(f"⚠️ Fecha en CDC no cumple formato válido: {fecha_raw}")
                 return invoice
-                
-            year_cdc = fecha_pattern.group(1)
-            month_cdc = fecha_pattern.group(2)
-            day_cdc = fecha_pattern.group(3)
-            fecha_cdc_str = f"{year_cdc}-{month_cdc}-{day_cdc}"
-            
-            # Comparar fechas
+
+            # Convertir a objeto fecha
+            try:
+                fecha_cdc = datetime.strptime(fecha_raw, "%Y%m%d").date()
+            except ValueError as e:
+                logger.warning(f"⚠️ Fecha inválida al parsear: {fecha_raw} – Error: {e}")
+                return invoice
+
+            # Validación lógica (evitar fechas ridículas)
+            if fecha_cdc.year < 2020 or fecha_cdc > datetime.today().date():
+                logger.warning(f"⚠️ Fecha CDC fuera de rango lógico: {fecha_cdc}")
+                return invoice
+
+            # Comparación con la fecha de OpenAI
             if invoice.fecha:
-                fecha_openai_str = invoice.fecha.strftime("%Y-%m-%d")
-                logger.info(f"🔍 Comparando fechas - OpenAI: {fecha_openai_str}, CDC: {fecha_cdc_str}")
-                
-                if fecha_openai_str != fecha_cdc_str:
-                    logger.warning(f"🔍 ¡DISCREPANCIA DETECTADA! Corrigiendo {fecha_openai_str} → {fecha_cdc_str}")
-                    invoice.fecha = datetime.strptime(fecha_cdc_str, "%Y-%m-%d").date()
-                    logger.info(f"🔍 ✅ Fecha corregida usando CDC")
+                fecha_openai = invoice.fecha
+                logger.info(f"📅 Fecha OpenAI: {fecha_openai} | 📅 Fecha CDC: {fecha_cdc}")
+
+                if fecha_openai > fecha_cdc:
+                    logger.warning(f"🔁 CORRECCIÓN: Fecha OpenAI ({fecha_openai}) > CDC ({fecha_cdc}) → Se corrige.")
+                    invoice.fecha = fecha_cdc
                 else:
-                    logger.info(f"🔍 ✅ Fechas coinciden, no hay corrección necesaria")
+                    logger.info("✅ Fecha OpenAI es confiable o anterior a CDC. No se corrige.")
             else:
-                logger.info(f"🔍 Estableciendo fecha desde CDC: {fecha_cdc_str}")
-                invoice.fecha = datetime.strptime(fecha_cdc_str, "%Y-%m-%d").date()
-            
+                logger.info(f"🛠️ Estableciendo fecha directamente desde CDC: {fecha_cdc}")
+                invoice.fecha = fecha_cdc
+
             return invoice
-            
+
         except Exception as e:
-            logger.error(f"❌ Error validando contra CDC: {str(e)}")
+            logger.error(f"❌ Error inesperado al validar contra CDC: {str(e)}")
             return invoice
    
-
-    def _enhance_basic_invoice_with_cdc(self, invoice: InvoiceData) -> InvoiceData:
+    def _autocorrect_iva_consistency(self, data: dict) -> dict:
         """
-        Mejora factura básica extrayendo información del CDC y texto real del PDF.
-        
-        Mejoras aplicadas:
-        1. RUC desde CDC
-        2. Fecha desde CDC  
-        3. Nombre real desde PDF (NO inventado)
-        
+        Si los productos tienen iva = 0 pero el resumen muestra solo IVA al 5% o 10%, corrige todos los productos.
+
         Args:
-            invoice: Factura básica a mejorar
-            
+            data: Diccionario JSON extraído por OpenAI
+        
         Returns:
-            Factura mejorada con datos reales
+            dict: JSON corregido si aplica
         """
         try:
-            logger.info("🔧 INICIANDO mejora de factura básica con CDC")
-            cdc = getattr(invoice, 'cdc', '')
-            
-            # Manejo robusto del CDC - puede ser string, lista, etc.
-            if isinstance(cdc, list):
-                logger.warning(f"🔧 CDC es lista: {cdc}, tomando primer elemento")
-                cdc = str(cdc[0]) if cdc and len(cdc) > 0 else ''
-            else:
-                cdc = str(cdc) if cdc else ''
-            
-            # Limpiar CDC de caracteres no numéricos
-            cdc = re.sub(r'[^0-9]', '', cdc)
-            
-            if not cdc or len(cdc) != 44:
-                logger.warning(f"🔧 CDC inválido: {cdc} (longitud: {len(cdc)})")
-                return invoice
-            
-            logger.info(f"🔧 CDC válido encontrado: {cdc}")
-            
-            # Extraer RUC del CDC (primeros 9 caracteres: 8 dígitos + DV)
-            ruc_base = cdc[0:8]
-            dv = cdc[8]
-            ruc_completo = f"{ruc_base}-{dv}"
-            
-            # Extraer fecha del CDC
-            fecha_pattern = re.search(r'(20\d{2})(\d{2})(\d{2})', cdc)
-            if fecha_pattern:
-                year = fecha_pattern.group(1)
-                month = fecha_pattern.group(2) 
-                day = fecha_pattern.group(3)
-                fecha_cdc = f"{year}-{month}-{day}"
-                
-                logger.info(f"🔧 Datos extraídos del CDC:")
-                logger.info(f"   📄 RUC: {ruc_completo}")
-                logger.info(f"   📅 Fecha: {fecha_cdc}")
-                
-                # Actualizar datos básicos desde CDC
-                invoice.ruc_emisor = ruc_completo
-                try:
-                    invoice.fecha = datetime.strptime(fecha_cdc, "%Y-%m-%d").date()
-                except ValueError as e:
-                    logger.warning(f"🔧 Error parseando fecha del CDC: {e}")
-                    # No actualizar fecha si hay error
-                
-                # Extraer nombre real del PDF (NO inventar)
-                pdf_path = getattr(invoice, 'pdf_path', None)
-                nombre_real = self._extract_real_company_name_from_pdf(pdf_path, ruc_completo)
-                invoice.nombre_emisor = nombre_real
-                
-                logger.info(f"🔧 Factura básica mejorada:")
-                logger.info(f"   🏢 RUC: {invoice.ruc_emisor}")
-                logger.info(f"   🏢 Nombre: {invoice.nombre_emisor}")
-                logger.info(f"   📅 Fecha: {fecha_cdc}")
-                logger.info("✅ Mejoras aplicadas exitosamente")
-                
-            else:
-                logger.warning("🔧 No se pudo extraer fecha del CDC")
-            
-            return invoice
-            
+            productos = data.get("productos", [])
+            iva_5 = data.get("iva_5", 0)
+            iva_10 = data.get("iva_10", 0)
+
+            if not productos:
+                return data  # Nada que corregir
+
+            # Detectar si todos los productos tienen iva = 0 o falta el campo
+            todos_sin_iva = all(str(p.get("iva", 0)).strip() in ["0", ""] for p in productos)
+
+            if todos_sin_iva:
+                if iva_5 > 0 and iva_10 == 0:
+                    logger.info("🔁 Corrigiendo todos los productos a IVA 5%")
+                    for p in productos:
+                        p["iva"] = 5
+                    data["productos"] = productos
+                    return data
+                elif iva_10 > 0 and iva_5 == 0:
+                    logger.info("🔁 Corrigiendo todos los productos a IVA 10%")
+                    for p in productos:
+                        p["iva"] = 10
+                    data["productos"] = productos
+                    return data
+                else:
+                    logger.info("🧾 No se puede inferir un único IVA dominante, no se corrige")
+
+            return data
+
         except Exception as e:
-            logger.error(f"❌ Error mejorando factura básica: {str(e)}")
-            import traceback
-            logger.error(f"❌ Traceback: {traceback.format_exc()}")
-            return invoice
+            logger.warning(f"⚠️ Error en _autocorrect_iva_consistency: {e}")
+            return data
+    
 
     def _extract_real_company_name_from_pdf(self, pdf_path: str, ruc: str) -> str:
         """
@@ -1307,3 +1343,81 @@ Debes devolver un JSON con esta estructura:
         except Exception as e:
             logger.error(f"❌ Error extrayendo nombre real: {e}")
             return f"RUC {ruc} - REVISAR NOMBRE MANUALMENTE"
+    
+    
+    def extract_invoice_data_from_xml(self, xml_path: str, email_metadata: Dict[str, Any] = None) -> Optional[InvoiceData]:
+        """
+        Procesa un archivo XML de factura electrónica paraguaya usando OpenAI para estructurar los datos.
+
+        Args:
+            xml_path: Ruta al archivo XML (XML DTE oficial)
+            email_metadata: Metadatos del correo electrónico
+
+        Returns:
+            InvoiceData o None
+        """
+        try:
+            logger.info(f"📄 Procesando XML con OpenAI: {xml_path}")
+
+            if not os.path.exists(xml_path):
+                logger.warning("⛔ El archivo XML no existe")
+                return None
+
+            with open(xml_path, "r", encoding="utf-8") as f:
+                xml_content = f.read()
+
+            logger.info(f"✅ XML cargado: {len(xml_content)} caracteres")
+
+            # Construir prompt para OpenAI
+            prompt = self._build_prompt_for_xml(xml_content)
+            messages = [{"role": "user", "content": prompt}]
+
+            logger.info("🤖 Enviando XML a OpenAI...")
+            response = openai.ChatCompletion.create(
+                model="gpt-4o",
+                messages=messages,
+                max_tokens=1500,
+                temperature=0.2
+            )
+
+            raw_output = response.choices[0].message.content
+            logger.info(f"🤖 Respuesta OpenAI recibida: {len(raw_output)} caracteres")
+
+            # Procesar JSON
+            result = self._process_openai_response(raw_output, email_metadata)
+            if result:
+                logger.info("✅ Resultado procesado exitosamente desde XML")
+                return result
+            else:
+                logger.warning("⛔ Result is None.")
+                return None
+
+        except Exception as e:
+            logger.error(f"❌ Error procesando XML con OpenAI: {e}")
+            return None
+
+
+    def _build_prompt_for_xml(self, xml_content: str) -> str:
+        """
+        Construye un prompt especializado para interpretar XML DTE de facturas paraguayas.
+
+        Args:
+            xml_content: Contenido del archivo XML
+
+        Returns:
+            str: Prompt completo para OpenAI
+        """
+        base_prompt = self._get_base_prompt()
+
+        return f"""
+A continuación se provee el contenido bruto de un archivo XML correspondiente a una factura electrónica de Paraguay. Tu tarea es analizarlo cuidadosamente y extraer todos los datos relevantes siguiendo el siguiente formato JSON estructurado. 
+
+Debes devolver únicamente el JSON sin explicación adicional. 
+
+{base_prompt}
+
+Contenido XML:
+```xml
+{xml_content}
+```
+"""

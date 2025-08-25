@@ -357,83 +357,79 @@ class EmailProcessor:
     
     def get_email_content(self, email_id: str) -> Tuple[dict, list]:
         """
-        Obtiene el contenido de un correo específico.
-        
-        Args:
-            email_id: ID del correo a obtener.
-            
-        Returns:
-            Tuple: (metadata, attachments)
-                - metadata: Diccionario con asunto, remitente, fecha
-                - attachments: Lista de adjuntos con nombre y contenido
+        Obtiene el contenido de un correo específico (asunto, fecha, adjuntos, enlaces).
         """
         if not self.conn:
             if not self.connect():
                 return {}, []
-        
+
         try:
-            # Obtener el mensaje completo
             status, data = self.conn.fetch(email_id, "(RFC822)")
-            
             if status != "OK":
-                logger.error(f"Error al obtener el correo {email_id}: {status}")
+                logger.error(f"❌ Error al obtener el correo {email_id}: {status}")
                 return {}, []
-            
-            # Analizar el mensaje
+
             message = email.message_from_bytes(data[0][1])
-            
-            # Extraer metadata
+
             subject = self._decode_email_header(message.get("Subject", ""))
             sender = self._decode_email_header(message.get("From", ""))
             date_str = message.get("Date", "")
-            
-            # Convertir fecha a formato datetime
+
             date = None
             if date_str:
                 try:
                     date = email.utils.parsedate_to_datetime(date_str)
                 except Exception as e:
-                    logger.warning(f"Error al parsear la fecha '{date_str}': {str(e)}")
-            
+                    logger.warning(f"⚠️ Error al parsear fecha '{date_str}': {str(e)}")
+
             metadata = {
                 "subject": subject,
                 "sender": sender,
                 "date": date,
                 "message_id": email_id
             }
-            
-            # Buscar adjuntos y enlaces
+
             attachments = []
             links = self._extract_links_from_email(message)
-            
-            # Procesar adjuntos
+
             for part in message.walk():
                 if part.get_content_maintype() == "multipart":
                     continue
-                
+
                 filename = part.get_filename()
-                if filename:
-                    # Decodificar nombre de archivo si es necesario
-                    filename = self._decode_email_header(filename)
-                    
-                    # Verificar si es un PDF
-                    if filename.lower().endswith(".pdf"):
-                        content = part.get_payload(decode=True)
-                        attachments.append({
-                            "filename": filename,
-                            "content": content,
-                            "content_type": part.get_content_type()
-                        })
-            
-            logger.info(f"Correo {email_id} procesado: {subject} - {len(attachments)} adjuntos, {len(links)} enlaces")
-            
-            # Incluir los enlaces encontrados en los metadatos
+                if not filename:
+                    continue
+
+                # Limpiar nombre y obtener tipo MIME
+                filename = self._decode_email_header(filename).strip()
+                content_type = part.get_content_type().lower()
+                content = part.get_payload(decode=True)
+
+                # Detección de XML y PDF (robusta)
+                is_pdf = filename.endswith(".pdf") or content_type in ["application/pdf"]
+                is_xml = filename.endswith(".xml") or content_type in [
+                    "text/xml",
+                    "application/xml",
+                    "application/x-iso20022+xml",
+                    "application/x-invoice+xml"
+                ]
+
+                if is_pdf or is_xml:
+                    logger.info(f"📎 Adjunto detectado: {filename} ({content_type})")
+                    attachments.append({
+                        "filename": filename,
+                        "content": content,
+                        "content_type": content_type
+                    })
+
             metadata["links"] = links
-            
+
+            logger.info(f"📬 Correo {email_id} - Asunto: '{subject}' - Adjuntos: {len(attachments)} - Enlaces: {len(links)}")
+
             return metadata, attachments
-            
+
         except Exception as e:
-            logger.error(f"Error al procesar el correo {email_id}: {str(e)}")
+            logger.error(f"❌ Error al procesar el correo {email_id}: {str(e)}")
             return {}, []
     
     def _decode_email_header(self, header: str) -> str:
@@ -550,48 +546,50 @@ class EmailProcessor:
         
         return unique_links
     
-    def save_pdf_from_binary(self, content: bytes, filename: str) -> str:
+    def save_binary_file(self, content: bytes, filename: str) -> str:
         """
-        Guarda el contenido binario de un PDF en un archivo con nombre único garantizado.
-        
+        Guarda cualquier archivo binario (PDF, XML, etc.) con un nombre único garantizado.
+
         Args:
-            content: Contenido binario del PDF.
-            filename: Nombre del archivo.
-            
+            content: Contenido binario.
+            filename: Nombre original del archivo.
+
         Returns:
-            str: Ruta al archivo guardado o cadena vacía en caso de error.
+            str: Ruta absoluta del archivo guardado, o "" en caso de error.
         """
         try:
             import uuid
-            
-            # Crear el directorio si no existe
-            os.makedirs(settings.TEMP_PDF_DIR, exist_ok=True)
-            
-            # Limpiar el nombre del archivo original
+
+            # Detectar extensión
+            _, ext = os.path.splitext(filename)
+            ext = ext.lower() or ".bin"  # Default por seguridad
+
+            # Carpeta base (única para todo, o podés separarla según tipo si querés)
+            output_dir = settings.TEMP_PDF_DIR
+            os.makedirs(output_dir, exist_ok=True)
+
+            # Limpiar el nombre del archivo
             safe_filename = self._sanitize_filename(filename)
-            
-            # Generar nombre único con garantía absoluta
+
+            # Nombre único
             unique_filename = self._generate_unique_filename(safe_filename)
-            
-            # Ruta completa del archivo
-            file_path = os.path.join(settings.TEMP_PDF_DIR, unique_filename)
-            
-            # Verificar una vez más que no existe (por si acaso)
+            file_path = os.path.join(output_dir, unique_filename)
+
+            # Verificación extra de unicidad
             if os.path.exists(file_path):
-                # Si por alguna razón ya existe, agregar UUID adicional
                 name, ext = os.path.splitext(unique_filename)
                 unique_filename = f"{name}_{uuid.uuid4().hex[:8]}{ext}"
-                file_path = os.path.join(settings.TEMP_PDF_DIR, unique_filename)
-            
-            # Guardar el archivo
+                file_path = os.path.join(output_dir, unique_filename)
+
+            # Guardar archivo
             with open(file_path, "wb") as f:
                 f.write(content)
-            
-            logger.info(f"PDF guardado: {file_path}")
+
+            logger.info(f"🗂 Archivo guardado: {file_path}")
             return file_path
-            
+
         except Exception as e:
-            logger.error(f"Error al guardar PDF {filename}: {str(e)}")
+            logger.error(f"❌ Error al guardar archivo {filename}: {str(e)}")
             return ""
     
     def _sanitize_filename(self, filename: str) -> str:
@@ -701,7 +699,7 @@ class EmailProcessor:
                 (content_type.startswith("application/octet-stream") and is_pdf_content)):
                 logger.info("PDF directo detectado, guardando...")
                 filename = self._generate_filename_from_url(url, "pdf")
-                return self.save_pdf_from_binary(content_bytes, filename)
+                return self.save_binary_file(content_bytes, filename)
             
             # Si es XML (para facturas electrónicas)
             elif (content_type.startswith("application/xml") or 
@@ -872,7 +870,7 @@ class EmailProcessor:
                             if response_content_type.startswith("application/pdf"):
                                 logger.info(f"PDF encontrado y descargado desde: {full_url}")
                                 filename = self._generate_filename_from_url(full_url, "pdf")
-                                return self.save_pdf_from_binary(pdf_response.content, filename)
+                                return self.save_binary_file(pdf_response.content, filename)
                             else:
                                 logger.debug(f"El enlace no devolvió un PDF: {response_content_type}")
                         else:
@@ -963,75 +961,96 @@ class EmailProcessor:
             # Procesar cada correo
             for email_id in email_ids:
                 try:
-                    # Obtener contenido del correo
                     metadata, attachments = self.get_email_content(email_id)
-                    
                     if not metadata:
-                        logger.warning(f"No se pudo obtener metadatos del correo {email_id}")
+                        logger.warning(f"⚠️ No se pudo obtener metadatos del correo {email_id}")
                         continue
-                    
-                    # Procesar PDFs adjuntos y enlaces
+
+                    email_meta_for_ai = {
+                        "sender": metadata.get("sender", ""),
+                        "subject": metadata.get("subject", ""),
+                        "date": metadata.get("date")
+                    }
+
+                    xml_path = None
+                    pdf_path = None
                     processed_pdfs = []
-                    
-                    # 1. Procesar adjuntos directos
+
+                    # 🔍 Procesar adjuntos primero (XML tiene prioridad)
                     for attachment in attachments:
-                        if attachment.get("filename", "").lower().endswith(".pdf"):
-                            # Guardar el PDF
-                            pdf_path = self.save_pdf_from_binary(
-                                attachment["content"],
-                                attachment["filename"]
-                            )
-                            
-                            if pdf_path:
-                                processed_pdfs.append({
-                                    "path": pdf_path,
-                                    "source": "attachment"
-                                })
-                    
-                    # 2. Procesar enlaces a PDFs y facturas electrónicas
-                    if "links" in metadata and metadata["links"]:
-                        logger.info(f"Procesando {len(metadata['links'])} enlaces encontrados")
-                        
-                        for link in metadata["links"]:
-                            logger.info(f"Intentando procesar enlace: {link}")
-                            
-                            # Intentar descargar desde cualquier enlace (no solo los que terminan en .pdf)
-                            pdf_path = self.download_pdf_from_url(link)
-                            
-                            if pdf_path:
-                                logger.info(f"PDF descargado exitosamente desde: {link}")
-                                processed_pdfs.append({
-                                    "path": pdf_path,
-                                    "source": "link",
-                                    "original_url": link
-                                })
-                            else:
-                                logger.warning(f"No se pudo descargar PDF desde: {link}")
-                    
-                    # Procesar cada PDF encontrado con OpenAI
-                    for pdf_info in processed_pdfs:
-                        pdf_path = pdf_info["path"]
-                        
-                        # Preparar metadatos para el procesador de OpenAI
-                        email_meta_for_ai = {
-                            "sender": metadata.get("sender", ""),
-                            "subject": metadata.get("subject", ""),
-                            "date": metadata.get("date")
-                        }
-                        
-                        # Extraer datos con OpenAI
-                        invoice_data = self.openai_processor.extract_invoice_data(pdf_path, email_meta_for_ai)
-                        
+                        filename = attachment.get("filename", "").lower()
+                        content_type = attachment.get("content_type", "").lower()
+                        content = attachment.get("content")
+
+                        is_pdf = filename.endswith(".pdf") or content_type in ["application/pdf"]
+                        is_xml = (
+                            filename.endswith(".xml") or
+                            content_type in [
+                                "text/xml",
+                                "application/xml",
+                                "application/x-iso20022+xml",
+                                "application/x-invoice+xml"
+                            ]
+                        )
+
+                        if is_xml:
+                            xml_path = self.save_binary_file(content, filename)
+                            logger.info(f"📄 XML adjunto detectado: {filename}")
+                        elif is_pdf:
+                            pdf_path = self.save_binary_file(content, filename)
+                            logger.info(f"📄 PDF adjunto detectado: {filename}")
+
+                    # ✅ Procesar XML si existe
+                    if xml_path:
+                        logger.info("📄 Procesando XML adjunto como fuente principal")
+                        invoice_data = self.openai_processor.extract_invoice_data_from_xml(xml_path)
                         if invoice_data:
-                            # Agregar a la lista de facturas procesadas
                             result.invoices.append(invoice_data)
                             result.invoice_count += 1
-                    
-                    # Marcar correo como leído
+                            self.mark_as_read(email_id)
+                            continue  # XML ya fue procesado, saltar a siguiente correo
+
+                    # 📄 Si no hay XML, procesar PDF adjunto
+                    if pdf_path:
+                        logger.info("📄 Procesando PDF porque no se encontró XML")
+                        invoice_data = self.openai_processor.extract_invoice_data(pdf_path, email_meta_for_ai)
+                        if invoice_data:
+                            result.invoices.append(invoice_data)
+                            result.invoice_count += 1
+
+                    # 🔗 Procesar enlaces si no hubo XML
+                    if not xml_path and "links" in metadata and metadata["links"]:
+                        logger.info(f"🔗 Procesando {len(metadata['links'])} enlaces encontrados")
+                        for link in metadata["links"]:
+                            logger.info(f"🔗 Intentando procesar enlace: {link}")
+                            downloaded_path = self.download_pdf_from_url(link)
+
+                            if not downloaded_path:
+                                logger.warning(f"❌ No se pudo descargar desde el enlace: {link}")
+                                continue
+
+                            lower_path = downloaded_path.lower()
+                            invoice_data = None
+
+                            if lower_path.endswith(".xml") and "factura" in lower_path:
+                                logger.info("📄 XML detectado desde enlace, procesando como factura electrónica")
+                                invoice_data = self.openai_processor.extract_invoice_data_from_xml(downloaded_path)
+                            elif lower_path.endswith(".pdf"):
+                                logger.info("📄 PDF detectado desde enlace, procesando con OpenAI")
+                                invoice_data = self.openai_processor.extract_invoice_data(downloaded_path, email_meta_for_ai)
+                            else:
+                                logger.warning(f"⚠️ Tipo de archivo no reconocido: {downloaded_path}")
+                                continue
+
+                            if invoice_data:
+                                result.invoices.append(invoice_data)
+                                result.invoice_count += 1
+
+                    # ✅ Marcar el correo como leído después de todos los intentos
                     self.mark_as_read(email_id)
-                    
+
                 except Exception as e:
-                    logger.error(f"Error al procesar el correo {email_id}: {str(e)}")
+                    logger.error(f"❌ Error al procesar el correo {email_id}: {str(e)}")
                     continue
             
             # Exportar a Excel si hay facturas

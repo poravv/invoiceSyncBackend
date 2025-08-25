@@ -173,21 +173,25 @@ class ExcelExporterASCONT:
                     "ruc": invoice.ruc_emisor or "",
                     "razon": invoice.nombre_emisor or "",
                     "tipo": self._determinar_tipo_documento_real(invoice),
-                    "gra10": self._parse_monto(invoice.subtotal_10),
-                    "iva10": self._parse_monto(invoice.iva_10),
-                    "gra5": self._parse_monto(invoice.subtotal_5),
-                    "iva5": self._parse_monto(invoice.iva_5),
-                    "exentos": self._parse_monto(invoice.subtotal_exentas),
+                    #"gra10": self._parse_monto(invoice.subtotal_10),
+                    "gra10": invoice.gravado_10,
+                    "iva10": invoice.iva_10,
+                    #"gra5": self._parse_monto(invoice.subtotal_5),
+                    "gra5": invoice.gravado_5,
+                    "iva5": invoice.iva_5,
+                    #"exentos": self._parse_monto(invoice.subtotal_exentas),
+                    "exentos": invoice.subtotal_exentas,
                     "num_tim": invoice.timbrado or "",
                     "descripcion": descripcion_final,
                     "moneda": getattr(invoice, 'moneda', 'GS') or 'GS',
-                    "tipo_cambio": float(getattr(invoice, 'tipo_cambio', 1.0) or 1.0),
+                    #"tipo_cambio": float(getattr(invoice, 'tipo_cambio', 1.0) or 1.0),
+                    "tipo_cambio": float(invoice.tipo_cambio) if invoice.moneda.upper() in ["USD", "DOLLAR", "DÓLAR"] and getattr(invoice, 'tipo_cambio', None) else 1.0,
                     "ruc_cliente": invoice.ruc_cliente or "",
                     "razon_cliente": invoice.nombre_cliente or "",
                     "CDC": self._formatear_cdc(invoice.cdc),
                     "email_origen": self._formatear_email_origen(invoice.email_origen),
                     "procesado_en": invoice.procesado_en.strftime("%d/%m/%Y %H:%M:%S") if invoice.procesado_en else "",
-                    "monto_total": self._parse_monto(invoice.monto_total) or (gra10 + gra5 + exento + iva10 + iva5)
+                    "monto_total": invoice.monto_total or (gra10 + gra5 + exento + iva10 + iva5)
                 }
 
                 ascont_data.append(ascont_record)
@@ -609,13 +613,19 @@ class ExcelExporterASCONT:
 
     def _recalcular_totales_desde_productos(self, invoice: InvoiceData):
         """
-        Recalcula subtotales e IVA a partir de los productos **solo si los campos vienen vacíos o en 0**.
+        Recalcula subtotales, IVA y montos gravados a partir de los productos,
+        manteniendo decimales si la moneda es extranjera (ej: USD).
+
+        Solo recalcula si los campos vienen vacíos o en 0.
         """
         if not invoice.productos:
             return
 
         try:
-            # Recalcular subtotales siempre (es seguro)
+            is_extranjera = str(invoice.moneda).upper() == "USD"
+            decimal_fn = lambda x: x if is_extranjera else round(x)
+
+            # Subtotales según IVA
             invoice.subtotal_exentas = sum(
                 p.total for p in invoice.productos if int(p.iva or 0) == 0
             )
@@ -626,12 +636,16 @@ class ExcelExporterASCONT:
                 p.total for p in invoice.productos if int(p.iva or 0) == 10
             )
 
-            # Solo recalcular IVA si vino vacío o en 0
+            # IVA: solo si no está presente
             if invoice.iva_5 in (None, 0):
-                invoice.iva_5 = round(invoice.subtotal_5 * 5 / 105)
+                invoice.iva_5 = decimal_fn(invoice.subtotal_5 * 5 / 105)
 
             if invoice.iva_10 in (None, 0):
-                invoice.iva_10 = round(invoice.subtotal_10 * 10 / 110)
+                invoice.iva_10 = decimal_fn(invoice.subtotal_10 * 10 / 110)
+
+            # Monto gravado = subtotal - IVA
+            invoice.gravado_5 = decimal_fn(invoice.subtotal_5 - invoice.iva_5)
+            invoice.gravado_10 = decimal_fn(invoice.subtotal_10 - invoice.iva_10)
 
         except Exception as e:
             logger.error(f"❌ Error al recalcular totales desde productos: {e}")
