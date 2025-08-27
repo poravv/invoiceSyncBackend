@@ -974,22 +974,20 @@ class EmailProcessor:
 
                     xml_path = None
                     pdf_path = None
-                    processed_pdfs = []
+                    factura_procesada = False  # 👈 bandera para saber si se procesó alguna factura
 
-                    # 🔍 Procesar adjuntos primero (XML tiene prioridad)
+                    # 🔍 Procesar adjuntos (XML tiene prioridad)
                     for attachment in attachments:
                         filename = attachment.get("filename", "").lower()
                         content_type = attachment.get("content_type", "").lower()
                         content = attachment.get("content")
 
-                        is_pdf = filename.endswith(".pdf") or content_type in ["application/pdf"]
+                        is_pdf = filename.endswith(".pdf") or content_type == "application/pdf"
                         is_xml = (
                             filename.endswith(".xml") or
                             content_type in [
-                                "text/xml",
-                                "application/xml",
-                                "application/x-iso20022+xml",
-                                "application/x-invoice+xml"
+                                "text/xml", "application/xml",
+                                "application/x-iso20022+xml", "application/x-invoice+xml"
                             ]
                         )
 
@@ -1007,19 +1005,19 @@ class EmailProcessor:
                         if invoice_data:
                             result.invoices.append(invoice_data)
                             result.invoice_count += 1
-                            self.mark_as_read(email_id)
-                            continue  # XML ya fue procesado, saltar a siguiente correo
+                            factura_procesada = True
 
-                    # 📄 Si no hay XML, procesar PDF adjunto
-                    if pdf_path:
+                    # 📄 Si no hay XML válido, procesar PDF
+                    elif pdf_path:
                         logger.info("📄 Procesando PDF porque no se encontró XML")
                         invoice_data = self.openai_processor.extract_invoice_data(pdf_path, email_meta_for_ai)
                         if invoice_data:
                             result.invoices.append(invoice_data)
                             result.invoice_count += 1
+                            factura_procesada = True
 
                     # 🔗 Procesar enlaces si no hubo XML
-                    if not xml_path and "links" in metadata and metadata["links"]:
+                    if not factura_procesada and metadata.get("links"):
                         logger.info(f"🔗 Procesando {len(metadata['links'])} enlaces encontrados")
                         for link in metadata["links"]:
                             logger.info(f"🔗 Intentando procesar enlace: {link}")
@@ -1045,9 +1043,13 @@ class EmailProcessor:
                             if invoice_data:
                                 result.invoices.append(invoice_data)
                                 result.invoice_count += 1
+                                factura_procesada = True
 
-                    # ✅ Marcar el correo como leído después de todos los intentos
-                    self.mark_as_read(email_id)
+                    # ✅ Marcar como leído solo si hubo procesamiento exitoso
+                    if factura_procesada:
+                        self.mark_as_read(email_id)
+                    else:
+                        logger.warning(f"⚠️ Ninguna factura procesada del correo {email_id}, no se marcará como leído.")
 
                 except Exception as e:
                     logger.error(f"❌ Error al procesar el correo {email_id}: {str(e)}")
