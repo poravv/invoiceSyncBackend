@@ -12,7 +12,7 @@ def base_text_schema() -> Dict[str, Any]:
         "nombre_emisor": "Razón social completa",
         "condicion_venta": "CONTADO o CREDITO",
         "tipo_documento": "CO o CR",
-        "tipo_cambio": None,  # si corresponde (USD)
+        "tipo_cambio": "None o Tipo de cambio o cambio o TiCam vienen en moneda extranjera en la factura",  # si corresponde (USD)
         "subtotal_exentas": 0,
         "subtotal_5": 0,      # = gravado 5% (base imponible, sin IVA)
         "iva_5": 0,
@@ -21,10 +21,10 @@ def base_text_schema() -> Dict[str, Any]:
         "monto_total": 0,
         "timbrado": "None o NumTim (como aparece en la factura)",
         "cdc": "None o (DE Id) CDC (como aparece en la factura)",
-        "ruc_cliente": None,
-        "nombre_cliente": None,
-        "email_cliente": None,
-        "moneda": "GS",
+        "ruc_cliente": "None o ruc cliente o cliente o RucRec vienen en la factura",
+        "nombre_cliente": "None o dNomRec o dNomFanRec vienen en la factura",
+        "email_cliente": "None o email cliente o EmailRec vienen en la factura",
+        "moneda": "GS PYG o USD o Dolar o Dollar o MoneOpe como figura en la factura",
         "actividad_economica": None,
         "empresa": {
             "nombre": None,
