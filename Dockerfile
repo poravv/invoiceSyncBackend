@@ -1,5 +1,10 @@
 FROM python:3.9-slim
 
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONIOENCODING=utf-8 \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
 # Instalar Tesseract OCR y dependencias
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \

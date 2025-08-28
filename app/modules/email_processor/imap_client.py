@@ -1,15 +1,17 @@
 import imaplib
 import email
 import logging
-from typing import List, Tuple, Optional
+from typing import List, Optional, Set
 from email.header import decode_header
+from email.message import Message
+import os
 
 logger = logging.getLogger(__name__)
 
 class IMAPClient:
     """
-    Envoltura mínima sobre imaplib para centralizar conexión, búsqueda, fetch y flags.
-    Maneja select(), login/logout y errores comunes.
+    Envoltura mínima: conecta, busca por asunto, fetch por UID y marca como leído por UID.
+    Pensado para cPanel y Gmail. (Asumiendo términos SIN acentos en .env)
     """
     def __init__(self, host: str, port: int, username: str, password: str, mailbox: str = "INBOX"):
         self.host = host
@@ -18,19 +20,27 @@ class IMAPClient:
         self.password = password
         self.mailbox = mailbox
         self.conn: Optional[imaplib.IMAP4_SSL] = None
+        self.is_gmail: bool = False
 
     def connect(self) -> bool:
         try:
             logger.info(f"host {self.host}")
             logger.info(f"port {self.port}")
             logger.info(f"username {self.username}")
+
+            self.is_gmail = "imap.gmail.com" in (self.host or "").lower()
             self.conn = imaplib.IMAP4_SSL(self.host, self.port)
             self.conn.login(self.username, self.password)
-            self.conn.select(self.mailbox)
-            logger.info(f"Conexión exitosa al correo {self.username}")
+
+            # mailbox
+            typ, _ = self.conn.select(self.mailbox)
+            if typ != "OK":
+                raise RuntimeError(f"No se pudo seleccionar mailbox: {self.mailbox}")
+
+            logger.info(f"Conexión exitosa al correo {self.username} | is_gmail={self.is_gmail}")
             return True
         except Exception as e:
-            logger.error(f"Error al conectar al correo: {str(e)}")
+            logger.error(f"Error al conectar al correo: {e}")
             self.conn = None
             return False
 
@@ -39,52 +49,97 @@ class IMAPClient:
             return
         try:
             self.conn.close()
+        except Exception:
+            pass
+        try:
             self.conn.logout()
             logger.info("Desconexión exitosa del servidor de correo")
         except Exception as e:
             logger.error(f"Error al desconectar del servidor de correo: {str(e)}")
 
-    def search(self, *criteria) -> List[str]:
-        if not self.conn:
+    def search(self, subject_terms: List[str]) -> List[str]:
+        """
+        Devuelve UIDs de correos que coincidan con cualquiera de los términos de asunto.
+        Respeta EMAIL_SEARCH_CRITERIA: 'ALL' = todos, cualquier otro valor = solo no leídos.
+        Funciona igual para Gmail y servidores IMAP comunes. Sin X-GM-RAW.
+        """
+        if not self.conn and not self.connect():
             return []
-        try:
-            status, messages = self.conn.search(None, *criteria)
-            if status != "OK":
-                logger.error(f"Error en la búsqueda de correos: {status}")
+
+        unread_only = (os.getenv("EMAIL_SEARCH_CRITERIA", "UNSEEN").upper() != "ALL")
+        flag_args = ['UNSEEN'] if unread_only else ['ALL']
+        terms = [t.strip() for t in (subject_terms or []) if t and t.strip()]
+
+        def _decode_ids(data) -> List[str]:
+            if not data:
                 return []
-            ids = [eid.decode() for eid in messages[0].split()]
-            return ids
-        except Exception as e:
-            logger.error(f"Error al buscar correos: {str(e)}")
-            return []
+            first = data[0]
+            payload = first.decode('utf-8', errors='ignore').strip() if isinstance(first, (bytes, bytearray)) else str(first).strip()
+            return payload.split() if payload else []
 
-    def fetch_message(self, email_id: str) -> Optional[email.message.Message]:
+        uids: Set[str] = set()
+
+        # Sin términos: traemos todo según flag
+        if not terms:
+            typ, data = self.conn.uid('SEARCH', *flag_args)
+            if typ == 'OK':
+                uids |= set(_decode_ids(data))
+            else:
+                logger.error(f"UID SEARCH {' '.join(flag_args)} falló: {typ}")
+            return sorted(uids, key=lambda x: int(x))
+
+        # Con términos: una búsqueda por término → unión
+        for term in terms:
+            args = flag_args + ['SUBJECT', f'"{term}"']
+            try:
+                logger.debug(f"IMAP UID SEARCH args: {args}")  # para auditar exactamente qué se envía
+                typ, data = self.conn.uid('SEARCH', *args)
+                if typ == 'OK':
+                    uids |= set(_decode_ids(data))
+                else:
+                    logger.error(f"UID SEARCH para term '{term}' falló: {typ}")
+            except Exception as e:
+                logger.error(f"UID SEARCH error para term '{term}': {e}")
+
+        return sorted(uids, key=lambda x: int(x))
+
+    def fetch_message(self, email_uid: str) -> Optional[Message]:
         if not self.conn:
             return None
         try:
-            status, data = self.conn.fetch(email_id, "(RFC822)")
-            if status != "OK":
-                logger.error(f"❌ Error al obtener el correo {email_id}: {status}")
+            status, data = self.conn.uid('FETCH', email_uid, '(RFC822)')
+            # data esperado: [(b'<uid> (RFC822 {<len>}', b'<raw>'), b')']
+            if status != 'OK' or not data:
+                logger.error(f"❌ Error al obtener el correo UID {email_uid}: {status}")
                 return None
-            return email.message_from_bytes(data[0][1])
+            # Busca el tuple con el contenido real
+            for item in data:
+                if isinstance(item, tuple) and len(item) >= 2:
+                    return email.message_from_bytes(item[1])
+            logger.error(f"❌ Formato inesperado en FETCH UID {email_uid}: {data!r}")
+            return None
         except Exception as e:
-            logger.error(f"❌ Error al hacer fetch del correo {email_id}: {str(e)}")
+            logger.error(f"❌ Error al hacer FETCH UID {email_uid}: {e}")
             return None
 
-    def mark_seen(self, email_id: str) -> bool:
+    def mark_seen(self, email_uid: str) -> bool:
         if not self.conn:
             return False
         try:
-            self.conn.store(email_id, '+FLAGS', '\\Seen')
-            logger.info(f"Correo {email_id} marcado como leído")
-            return True
+            # ✅ Usar UID STORE
+            status, _ = self.conn.uid('STORE', email_uid, '+FLAGS', '(\\Seen)')
+            ok = status == 'OK'
+            if ok:
+                logger.info(f"Correo UID {email_uid} marcado como leído")
+            else:
+                logger.error(f"Error al marcar como leído UID {email_uid}: {status}")
+            return ok
         except Exception as e:
-            logger.error(f"Error al marcar el correo {email_id} como leído: {str(e)}")
+            logger.error(f"Error al marcar el correo UID {email_uid} como leído: {str(e)}")
             return False
 
 
 def decode_mime_header(header: str) -> str:
-    """Decodifica cualquier encabezado MIME de forma segura."""
     if not header:
         return ""
     try:

@@ -10,12 +10,16 @@ from datetime import datetime
 from app.config.settings import settings
 from app.models.models import EmailConfig, MultiEmailConfig, InvoiceData, ProcessResult
 from app.modules.openai_processor.openai_processor import OpenAIProcessor
+
+
 from app.modules.excel_exporter.excel_exporter import ExcelExporter
+from app.modules.email_processor.errors import OpenAIFatalError, OpenAIRetryableError
 
 from .imap_client import IMAPClient, decode_mime_header
 from .link_extractor import extract_links_from_message
 from .downloader import download_pdf_from_url
 from .storage import save_binary, sanitize_filename, ensure_dirs
+
 
 from .dedup import deduplicate_invoices
 
@@ -257,27 +261,24 @@ class EmailProcessor:
 
     # --------- Search logic ---------
     def search_emails(self) -> List[str]:
+        """
+        Usa IMAPClient.search(subject_terms) que devuelve UIDs (str).
+        NOTA: los términos en .env deben venir SIN acentos (como acordamos).
+        """
         if not self.client.conn:
             if not self.connect():
                 return []
-        base = self.config.search_criteria.split() if self.config.search_criteria else []
+
         terms = self.config.search_terms or []
         if not terms:
-            return self.client.search(*base)
+            logger.info("No se configuraron términos de búsqueda. Se devolverá lista vacía.")
+            return []
 
-        if len(terms) == 1:
-            query = base + ["SUBJECT", f'"{terms[0]}"']
-            return self.client.search(*query)
+        # Pasamos la lista de términos directamente al nuevo IMAPClient.search()
+        uids = self.client.search(terms)
 
-        # múltiples términos → OR manual: uniones de resultados por término
-        found = set()
-        for t in terms:
-            q = base + ["SUBJECT", f'"{t}"']
-            ids = self.client.search(*q)
-            found.update(ids)
-        ids_list = list(found)
-        logger.info(f"Se encontraron {len(ids_list)} correos combinando términos: {terms}")
-        return ids_list
+        logger.info(f"Se encontraron {len(uids)} correos combinando términos: {terms}")
+        return uids
 
     # --------- Fetch + parse ---------
     def get_email_content(self, email_id: str) -> Tuple[dict, list]:
@@ -346,7 +347,13 @@ class EmailProcessor:
 
             logger.info(f"Procesando {len(email_ids)} correos")
 
+            abort_run = False
+
             for eid in email_ids:
+
+                if abort_run:           
+                    break
+
                 try:
                     metadata, attachments = self.get_email_content(eid)
                     if not metadata:
@@ -378,53 +385,62 @@ class EmailProcessor:
                         elif is_pdf:
                             pdf_path = save_binary(content, fname, force_pdf=True)
                             logger.info(f"📄 PDF adjunto detectado: {fname}")
-
-                    # XML primero
-                    if xml_path:
-                        logger.info("📄 Procesando XML adjunto como fuente principal")
-                        inv = self.openai_processor.extract_invoice_data_from_xml(xml_path, email_meta_for_ai)
-                        if inv:
-                            result.invoices.append(inv)
-                            result.invoice_count += 1
-                            processed = True
-
-                    # PDF si no hubo XML válido
-                    elif pdf_path:
-                        logger.info("📄 Procesando PDF porque no se encontró XML")
-                        inv = self.openai_processor.extract_invoice_data(pdf_path, email_meta_for_ai)
-                        if inv:
-                            result.invoices.append(inv)
-                            result.invoice_count += 1
-                            processed = True
-
-                    # Enlaces si nada funcionó
-                    if not processed and metadata.get("links"):
-                        logger.info(f"🔗 Procesando {len(metadata['links'])} enlaces encontrados")
-                        for link in metadata["links"]:
-                            logger.info(f"🔗 Intentando procesar enlace: {link}")
-                            downloaded_path = download_pdf_from_url(link)
-                            if not downloaded_path:
-                                logger.warning(f"❌ No se pudo descargar desde el enlace: {link}")
-                                continue
-
-                            low = downloaded_path.lower()
-                            inv = None
-                            if low.endswith(".xml") and "factura" in low:
-                                logger.info("📄 XML detectado desde enlace, procesando como factura electrónica")
-                                inv = self.openai_processor.extract_invoice_data_from_xml(downloaded_path)
-                            elif low.endswith(".pdf"):
-                                logger.info("📄 PDF detectado desde enlace, procesando con OpenAI")
-                                inv = self.openai_processor.extract_invoice_data(downloaded_path, email_meta_for_ai)
-                            else:
-                                logger.warning(f"⚠️ Tipo de archivo no reconocido: {downloaded_path}")
-                                continue
-
+                    try:
+                        # XML primero
+                        if xml_path:
+                            logger.info("📄 Procesando XML adjunto como fuente principal")
+                            inv = self.openai_processor.extract_invoice_data_from_xml(xml_path, email_meta_for_ai)
                             if inv:
                                 result.invoices.append(inv)
                                 result.invoice_count += 1
                                 processed = True
 
-                    # Marcar leído si hubo procesamiento OK
+                        # PDF si no hubo XML válido
+                        elif pdf_path:
+                            logger.info("📄 Procesando PDF porque no se encontró XML")
+                            inv = self.openai_processor.extract_invoice_data(pdf_path, email_meta_for_ai)
+                            if inv:
+                                result.invoices.append(inv)
+                                result.invoice_count += 1
+                                processed = True
+
+                        # Enlaces si nada funcionó
+                        if not processed and metadata.get("links"):
+                            logger.info(f"🔗 Procesando {len(metadata['links'])} enlaces encontrados")
+                            for link in metadata["links"]:
+                                logger.info(f"🔗 Intentando procesar enlace: {link}")
+                                downloaded_path = download_pdf_from_url(link)
+                                if not downloaded_path:
+                                    logger.warning(f"❌ No se pudo descargar desde el enlace: {link}")
+                                    continue
+
+                                low = downloaded_path.lower()
+                                inv = None
+                                if low.endswith(".xml") and "factura" in low:
+                                    logger.info("📄 XML detectado desde enlace, procesando como factura electrónica")
+                                    inv = self.openai_processor.extract_invoice_data_from_xml(downloaded_path)
+                                elif low.endswith(".pdf"):
+                                    logger.info("📄 PDF detectado desde enlace, procesando con OpenAI")
+                                    inv = self.openai_processor.extract_invoice_data(downloaded_path, email_meta_for_ai)
+                                else:
+                                    logger.warning(f"⚠️ Tipo de archivo no reconocido: {downloaded_path}")
+                                    continue
+
+                                if inv:
+                                    result.invoices.append(inv)
+                                    result.invoice_count += 1
+                                    processed = True
+                    except OpenAIFatalError as e:         # ⬅️ NUEVO
+                        logger.error(f"❌ Error FATAL de OpenAI en correo {eid}: {e}. Abortando lote.")
+                        abort_run = True                   # ⬅️ NUEVO
+                        processed = False                  # ⬅️ aseguramos que NO se marque leído
+                        break                              # ⬅️ cortamos el loop completo
+
+                    except OpenAIRetryableError as e:      # ⬅️ NUEVO
+                        logger.warning(f"⚠️ Error transitorio de OpenAI en correo {eid}: {e}. Se omite este correo.")
+                        processed = False                  # no marcar leído
+                        continue
+                        # Marcar leído si hubo procesamiento OK
                     if processed:
                         self.client.mark_seen(eid)
                     else:
@@ -433,6 +449,17 @@ class EmailProcessor:
                 except Exception as e:
                     logger.error(f"❌ Error al procesar el correo {eid}: {str(e)}")
                     continue
+            
+            # Si abortamos por fatal, devolvemos estado de error
+            if abort_run:
+                self.disconnect()
+                return ProcessResult(
+                    success=False,
+                    message="Procesamiento abortado por error fatal de OpenAI (API key/cuota).",
+                    invoice_count=len(result.invoices),
+                    invoices=result.invoices,
+                    excel_files=[]
+            )
 
             if result.invoices:
                 excel_path = self.excel_exporter.export_invoices(result.invoices)
@@ -485,3 +512,4 @@ class EmailProcessor:
         res = self.process_emails()
         (logger.info if res.success else logger.error)(res.message)
         return res
+    
