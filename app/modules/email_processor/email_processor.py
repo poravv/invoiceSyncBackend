@@ -19,6 +19,9 @@ from .storage import save_binary, sanitize_filename, ensure_dirs
 
 from .dedup import deduplicate_invoices
 
+# NUEVO runner thread-safe (sincroniza con tu API /job/start)
+from app.modules.scheduler.job_runner import ScheduledJobRunner
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,8 +45,12 @@ class MultiEmailProcessor:
 
         ensure_dirs()
 
+        # Scheduler legado (basado en 'schedule')
         self._job_running = False
         self._job_thread: Optional[threading.Thread] = None
+
+        # NUEVO: runner moderno para API /job/start|/job/stop
+        self._scheduler: Optional[ScheduledJobRunner] = None
 
         logger.info(f"MultiEmailProcessor inicializado con {len(self.email_configs)} cuentas de correo")
 
@@ -110,7 +117,9 @@ class MultiEmailProcessor:
             excel_files=excel_files
         )
 
-    # Scheduling para multi-cuenta
+    # ----------------------------
+    # Scheduler LEGADO (schedule)
+    # ----------------------------
     def start(self):
         if self._job_running:
             logger.warning("El scheduler ya está en ejecución")
@@ -142,6 +151,63 @@ class MultiEmailProcessor:
         res = self.process_all_emails()
         (logger.info if res.success else logger.error)(res.message)
         return res
+
+    # ------------------------------------------
+    # NUEVO: API esperada por /job/start y /job/stop
+    # ------------------------------------------
+    def start_scheduled_job(self):
+        """
+        Mantiene el nombre que espera tu API.
+        Inicia un runner que ejecuta process_all_emails() cada X minutos.
+        """
+        try:
+            interval = settings.JOB_INTERVAL_MINUTES
+        except Exception:
+            interval = 60
+
+        if self._scheduler and self._scheduler.is_running:
+            # ya está corriendo; no lo dupliques
+            logger.info("start_scheduled_job: ya en ejecución")
+            return {"ok": True, "message": "El job ya está en ejecución."}
+
+        self._scheduler = ScheduledJobRunner(
+            interval_minutes=interval,
+            target=self.process_all_emails
+        )
+        self._scheduler.start()
+        logger.info(f"start_scheduled_job: iniciado (cada {interval} min)")
+        return {"ok": True, "message": f"Job iniciado. Intervalo: {interval} minutos."}
+
+    def stop_scheduled_job(self):
+        """
+        Detiene el job programado si está en ejecución.
+        """
+        if self._scheduler and self._scheduler.is_running:
+            self._scheduler.stop()
+            logger.info("stop_scheduled_job: detenido")
+            return {"ok": True, "message": "Job detenido."}
+        logger.info("stop_scheduled_job: no había job en ejecución")
+        return {"ok": True, "message": "No había job en ejecución."}
+
+    def scheduled_job_status(self):
+        """
+        Snapshot simple del runner moderno (opcional para /job/status).
+        """
+        if not self._scheduler or not self._scheduler.is_running:
+            return {
+                "running": False,
+                "next_run": None,
+                "last_run": None,
+                "interval_minutes": settings.JOB_INTERVAL_MINUTES,
+                "last_result": None
+            }
+        return {
+            "running": True,
+            "next_run": self._scheduler.next_run,
+            "last_run": self._scheduler.last_run,
+            "interval_minutes": settings.JOB_INTERVAL_MINUTES,
+            "last_result": getattr(self._scheduler, "last_result", None)
+        }
 
 
 # =========================
@@ -387,7 +453,7 @@ class EmailProcessor:
     # ------------- (Opcional) scheduler single -------------
     def start_scheduled_job(self):
         """
-        Conservamos esta API por compatibilidad, pero recomendamos usar MultiEmailProcessor.start().
+        Conservamos esta API por compatibilidad, pero recomendamos usar MultiEmailProcessor.start_scheduled_job().
         """
         if getattr(self, "_job_running", False):
             logger.warning("El job ya está en ejecución")
