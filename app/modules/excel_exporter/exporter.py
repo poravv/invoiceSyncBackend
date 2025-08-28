@@ -103,13 +103,18 @@ class ExcelExporterASCONT:
                     "gra5": gra5,
                     "iva5": iva5,
                     "exentos": exen,
-                    "num_tim": inv.timbrado or "",
+                    "num_tim": (getattr(inv, "timbrado", "") 
+                        or (getattr(inv, "timbrado_data", None).nro if getattr(inv, "timbrado_data", None) else "")
+                        or ""),
                     "descripcion": descripcion,
                     "moneda": (getattr(inv, "moneda", "GS") or "GS"),
-                    "tipo_cambio": float(inv.tipo_cambio) if str(getattr(inv, "moneda","")).upper() in {"USD","DOLLAR","DÓLAR"} and getattr(inv, "tipo_cambio", None) else 0.0,
+                    "tipo_cambio": float(inv.tipo_cambio) if str(getattr(inv, "moneda","")).upper() in {"USD","DOLLAR","DÓLAR"} and getattr(inv, "tipo_cambio", None) else 0,
                     "ruc_cliente": inv.ruc_cliente or "",
                     "razon_cliente": inv.nombre_cliente or "",
-                    "CDC": formatear_cdc(inv.cdc),
+                    "CDC": formatear_cdc(
+                            getattr(inv, "cdc", "")
+                            or (getattr(inv, "factura_data", None).cdc if getattr(inv, "factura_data", None) else "")
+                    ),
                     "email_origen": inv.email_origen, #formatear_email_origen(getattr(inv, "email_origen", "")),
                     "procesado_en": inv.procesado_en.strftime("%d/%m/%Y %H:%M:%S") if getattr(inv, "procesado_en", None) else "",
                     "monto_total": parse_monto(getattr(inv, "monto_total", 0) or (gra10 + gra5 + exen + iva10 + iva5),

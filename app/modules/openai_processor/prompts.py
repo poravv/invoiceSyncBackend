@@ -19,8 +19,8 @@ def base_text_schema() -> Dict[str, Any]:
         "subtotal_10": 0,     # = gravado 10% (base imponible, sin IVA)
         "iva_10": 0,
         "monto_total": 0,
-        "timbrado": None,
-        "cdc": None,
+        "timbrado": "None o NumTim (como aparece en la factura)",
+        "cdc": "None o (DE Id) CDC (como aparece en la factura)",
         "ruc_cliente": None,
         "nombre_cliente": None,
         "email_cliente": None,

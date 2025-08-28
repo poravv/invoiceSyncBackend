@@ -147,6 +147,26 @@ class InvoiceDataASCONT(BaseModel):
 
     @classmethod
     def from_dict(cls, data: dict, email_metadata: dict = None):
+
+        fecha_parsed = try_parse_date(data.get("fecha"))
+
+        condicion_venta = (data.get("condicion_venta") or "CONTADO").upper()
+        condicion_compra = condicion_venta
+        tipo_documento = "CR" if "CREDITO" in condicion_venta else "CO"
+
+        moneda = (data.get("moneda") or "GS").upper()
+        if moneda == "PYG":
+            moneda = "GS"
+
+        # Fallbacks seguros
+        td = data.get("timbrado_data") or {}
+        fd = data.get("factura_data") or {}
+
+        timbrado = data.get("timbrado") or td.get("nro") or ""
+        cdc = data.get("cdc") or fd.get("cdc") or ""
+
+        numero_doc = data.get("numero_factura") or fd.get("contado_nro") or ""
+        
         fecha_parsed = try_parse_date(data.get("fecha"))
 
         condicion_venta = (data.get("condicion_venta") or "CONTADO").upper()
@@ -160,7 +180,7 @@ class InvoiceDataASCONT(BaseModel):
         return cls(
             fecha=fecha_parsed,
             tipo_documento=tipo_documento,
-            numero_documento=data.get("numero_factura"),
+            numero_documento=numero_doc,
             ruc_proveedor=data.get("ruc_emisor"),
             razon_social_proveedor=data.get("nombre_emisor"),
             condicion_compra=condicion_compra,
@@ -172,8 +192,8 @@ class InvoiceDataASCONT(BaseModel):
             exento=safe_float(data.get("subtotal_exentas")),
             total_factura=safe_float(data.get("monto_total")),
 
-            timbrado=data.get("timbrado"),
-            cdc=data.get("cdc"),
+            timbrado=timbrado,
+            cdc=cdc,
             moneda=moneda,
             tipo_cambio=safe_float(data.get("tipo_cambio", 0.0)),
 

@@ -89,8 +89,8 @@ def apply_ascont_formatting(excel_path: str) -> None:
                     cell.border = thin_border
                     cell.alignment = Alignment(vertical="center")
                     head = header_row[cell.column - 1]
-                    if head and any(x in str(head) for x in ["Gravado", "IVA", "Total", "Exento", "tipo_cambio"]):
-                        cell.number_format = "#,##0.00"
+                    # if head and any(x in str(head) for x in ["Gravado", "IVA", "Total", "Exento", "tipo_cambio"]):
+                    #     cell.number_format = "#,##0.00"
 
             # autosize
             for col in ws.columns:
@@ -110,8 +110,8 @@ def apply_ascont_formatting(excel_path: str) -> None:
                     text = str(cell.value) if cell.value is not None else ""
                     if cell.row == 1 or "RESUMEN" in text or "TOTAL GENERAL" in text or "IMPORTES" in text:
                         cell.font = Font(bold=True, size=12 if "RESUMEN" in text else 11)
-                    if isinstance(cell.value, (int, float)) and float(cell.value) != 0.0:
-                        cell.number_format = "#,##0.00"
+                    # if isinstance(cell.value, (int, float)) and float(cell.value) != 0.0:
+                    #     cell.number_format = "#,##0.00"
 
         wb.save(excel_path)
         logger.info("Formato ASCONT aplicado")
