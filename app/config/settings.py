@@ -5,7 +5,8 @@ from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 
 # Cargar variables de entorno desde el archivo .env
-load_dotenv()
+#load_dotenv()
+load_dotenv(encoding="utf-8")
 
 class Settings(BaseSettings):
     # Configuraciones de Email (compatibilidad hacia atrás)
@@ -14,6 +15,11 @@ class Settings(BaseSettings):
     EMAIL_USERNAME: str = os.getenv("EMAIL_USERNAME", "")
     EMAIL_PASSWORD: str = os.getenv("EMAIL_PASSWORD", "")
     EMAIL_USE_SSL: bool = os.getenv("EMAIL_USE_SSL", "True").lower() == "true"
+
+    # Configuraciones de post-procesamiento
+    POSTPROCESS_ENABLE_RECALC: bool = (os.getenv("POSTPROCESS_ENABLE_RECALC", "true").lower() == "true")
+    POSTPROCESS_ENABLE_RECONCILE: bool = (os.getenv("POSTPROCESS_ENABLE_RECONCILE", "true").lower() == "true")
+    POSTPROCESS_RECONCILE_TOLERANCE: int = int(os.getenv("POSTPROCESS_RECONCILE_TOLERANCE", 2))
     
     # Configuraciones para múltiples correos
     EMAILS_CONFIG: List[Dict[str, Any]] = []

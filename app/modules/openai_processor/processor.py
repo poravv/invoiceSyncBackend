@@ -57,7 +57,7 @@ class OpenAIProcessor:
             logger.exception("Error en extract_invoice_data: %s", e)
             return None
 
-    def extract_invoice_data_from_xml(self, xml_path: str, email_metadata: Optional[Dict[str, Any]] = None):
+    def extract_invoice_data_from_xml(self, xml_path: str, email_metadata: dict | None = None):
         try:
             import os
             if not os.path.exists(xml_path):
