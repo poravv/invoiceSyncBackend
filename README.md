@@ -30,7 +30,7 @@ InvoiceSync es un sistema automatizado para la extracción de datos de facturas 
 ## Requisitos
 
 - Python 3.9 o superior
-- Una cuenta en OpenAI con acceso a la API Vision (GPT-4o o GPT-4-Vision)
+- Una cuenta en OpenAI con acceso a la API Vision (gpt-5-mini o GPT-4-Vision)
 - Acceso a un servidor de correo con IMAP habilitado
 
 ## Instalación
@@ -222,7 +222,7 @@ El sistema puede ser adaptado para diferentes tipos de facturas ajustando los si
 ## Solución de problemas
 
 ### Error al procesar PDFs
-- Verifica que tu API key de OpenAI sea válida y tenga acceso a GPT-4o o GPT-4-Vision
+- Verifica que tu API key de OpenAI sea válida y tenga acceso a gpt-5-mini o GPT-4-Vision
 - Comprueba que los PDFs sean legibles y no estén protegidos
 
 ### Problemas de exportación a Excel

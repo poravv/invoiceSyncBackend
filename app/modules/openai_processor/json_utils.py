@@ -7,8 +7,22 @@ from typing import Any, Dict, List
 logger = logging.getLogger(__name__)
 
 def extract_and_normalize_json(text: str) -> Dict[str, Any]:
+    if not text or not text.strip():
+        logger.error("Respuesta vacía de OpenAI - no se puede procesar")
+        raise ValueError("Respuesta vacía de OpenAI")
+    
     content = _extract_json_block(text)
-    data = json.loads(content)
+    
+    if not content or not content.strip():
+        logger.error("No se pudo extraer JSON válido de la respuesta: %s", text[:200])
+        raise ValueError("No se pudo extraer JSON válido de la respuesta")
+    
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError as e:
+        logger.error("Error parseando JSON extraído: %s. Contenido: %s", e, content[:200])
+        raise ValueError(f"Error parseando JSON: {e}")
+    
     data = normalize_fields(data)
     data = autocorrect_iva_consistency(data)
     data = coerce_none_strings(data)        # ← NUEVO
@@ -18,20 +32,48 @@ def extract_and_normalize_json(text: str) -> Dict[str, Any]:
     return data
 
 def _extract_json_block(text: str) -> str:
+    if not text or not text.strip():
+        return ""
+    
+    # Log para debugging
+    logger.debug("Extrayendo JSON de respuesta: %s", text[:300])
+    
     # 1) bloque ```json
     m = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
     if m:
+        logger.debug("JSON encontrado en bloque ```json")
         return m.group(1)
+    
     # 2) primer objeto { ... }
     m = re.search(r"(\{[\s\S]*\})", text)
     if m:
+        logger.debug("JSON encontrado como objeto simple")
         return m.group(1)
+    
     # 3) limpieza agresiva
     cleaned = re.sub(r"```json\s*", "", text.strip(), flags=re.IGNORECASE)
     cleaned = re.sub(r"```.*$", "", cleaned, flags=re.MULTILINE)
     cleaned = re.sub(r"^.*?(\{)", r"\1", cleaned, flags=re.DOTALL)
     cleaned = re.sub(r"(\}).*$", r"\1", cleaned, flags=re.DOTALL)
-    return cleaned.strip()
+    
+    result = cleaned.strip()
+    if result:
+        logger.debug("JSON extraído después de limpieza agresiva")
+        return result
+    
+    # 4) último intento - buscar cualquier cosa que parezca JSON
+    logger.warning("No se pudo extraer JSON con métodos estándar, intentando búsqueda más agresiva")
+    
+    # Buscar cualquier secuencia que empiece con { y termine con }
+    matches = re.findall(r"\{[^{}]*\}", text)
+    if matches:
+        # Tomar el más largo que probablemente sea el más completo
+        longest = max(matches, key=len)
+        logger.debug("JSON encontrado con búsqueda agresiva, longitud: %d", len(longest))
+        return longest
+    
+    logger.error("No se pudo extraer JSON de la respuesta")
+    return ""
 
 def normalize_fields(data: Dict[str, Any]) -> Dict[str, Any]:
     """

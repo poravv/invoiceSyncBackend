@@ -77,9 +77,25 @@ class ExcelExporterASCONT:
 
             for inv in invoices:
                 fecha_str = inv.fecha.strftime("%d/%m/%Y") if inv.fecha else ""
-                detalle = generar_detalle_articulos(inv)
+                # detalle = generar_detalle_articulos(inv)
+                # descripcion_base = getattr(inv, "descripcion_factura", "") or ""
+                # descripcion = f"{descripcion_base}\n{detalle}" if detalle else descripcion_base
+
+                articulos_str = ", ".join(
+                    p.get("articulo", "").strip() if isinstance(p, dict) else str(getattr(p, "articulo", "")).strip()
+                    for p in (inv.productos or [])
+                    if (p.get("articulo") if isinstance(p, dict) else getattr(p, "articulo", "")).strip()
+                )
+
                 descripcion_base = getattr(inv, "descripcion_factura", "") or ""
-                descripcion = f"{descripcion_base}\n{detalle}" if detalle else descripcion_base
+
+                # Combinar con la base si existe
+                if descripcion_base and articulos_str:
+                    descripcion = f"{descripcion_base} - {articulos_str}"
+                elif descripcion_base:
+                    descripcion = descripcion_base
+                else:
+                    descripcion = articulos_str
 
                 # Decide enteros vs decimales por moneda
                 use_ints = (str(getattr(inv, "moneda", "PYG")).upper() != "USD")

@@ -5,66 +5,59 @@ import json
 from typing import Dict, Any
 
 def base_text_schema() -> Dict[str, Any]:
+    """
+    Esquema optimizado - solo campos que se usan en el export.
+    Eliminados campos innecesarios para ahorrar tokens.
+    """
     return {
+        # CAMPOS PRINCIPALES (siempre requeridos)
         "fecha": "YYYY-MM-DD",
         "numero_factura": "XXX-XXX-XXXXXXX",
         "ruc_emisor": "XXXXXXXX-X",
         "nombre_emisor": "Razón social completa",
         "condicion_venta": "CONTADO o CREDITO",
         "tipo_documento": "CO o CR",
-        "tipo_cambio": "None o Tipo de cambio o cambio o TiCam vienen en moneda extranjera en la factura",  # si corresponde (USD)
+        
+        # MONEDA Y CAMBIO
+        "tipo_cambio": "None o valor si está en moneda extranjera",
+        "moneda": "GS PYG o USD",
+        
+        # TOTALES PRINCIPALES (siempre requeridos)
         "subtotal_exentas": 0,
         "subtotal_5": 0,      # = gravado 5% (base imponible, sin IVA)
         "iva_5": 0,
         "subtotal_10": 0,     # = gravado 10% (base imponible, sin IVA)
         "iva_10": 0,
         "monto_total": 0,
-        "timbrado": "None o NumTim (como aparece en la factura)",
-        "cdc": "None o (DE Id) CDC (como aparece en la factura)",
-        "ruc_cliente": "None o ruc cliente o cliente o RucRec vienen en la factura",
-        "nombre_cliente": "None o dNomRec o dNomFanRec vienen en la factura",
-        "email_cliente": "None o email cliente o EmailRec vienen en la factura",
-        "moneda": "GS PYG o USD o Dolar o Dollar o MoneOpe como figura en la factura",
-        "actividad_economica": None,
-        "empresa": {
-            "nombre": None,
-            "ruc": None,
-            "direccion": None,
-            "telefono": None,
-            "actividad_economica": None,
-        },
-        "timbrado_data": {
-            "nro": None,
-            "fecha_inicio_vigencia": None,
-            "valido_hasta": None,
-        },
-        "factura_data": {
-            "contado_nro": None,
-            "fecha": None,
-            "caja_nro": None,
-            "cdc": None,
-            "condicion_venta": "CONTADO o CREDITO",
-        },
+        
+        # IDENTIFICADORES
+        "timbrado": "None o NumTim",
+        "cdc": "None o CDC (DE Id)",
+        
+        # CLIENTE
+        "ruc_cliente": "None o ruc cliente",
+        "nombre_cliente": "None o nombre cliente",
+        "email_cliente": "None o email cliente",
+        
+        # PRODUCTOS (solo campos esenciales)
         "productos": [
             {
-                "articulo": None,
+                "articulo": "descripción del producto/servicio",
                 "cantidad": 1,
                 "precio_unitario": 0,
                 "total": 0,
                 "iva": 0   # 0, 5 o 10
             }
-        ],
-        "totales": {
-            "cantidad_articulos": 0,
-            "subtotal": 0,
-            "total_a_pagar": 0,
-            "iva_0%": 0,
-            "iva_5%": 0,
-            "iva_10%": 0,
-            "total_iva": 0,
-        },
-        "cliente": {"nombre": None, "ruc": None, "email": None},
+        ]
     }
+
+# CAMPOS ELIMINADOS (no se usan en export):
+# - actividad_economica
+# - empresa (nombre, ruc, direccion, telefono, actividad_economica)
+# - timbrado_data (nro, fecha_inicio_vigencia, valido_hasta)
+# - factura_data (contado_nro, fecha, caja_nro, cdc, condicion_venta)
+# - totales (cantidad_articulos, subtotal, total_a_pagar, iva_0%, iva_5%, iva_10%, total_iva)
+# - cliente (nombre, ruc, email) - duplicado
 
 def build_text_prompt(pdf_text: str) -> str:
     schema = json.dumps(base_text_schema(), ensure_ascii=False, indent=2)
@@ -101,35 +94,68 @@ Analiza con extrema atención la imagen de una factura paraguaya y devuelve **so
 
 {schema}
 
-Reglas adicionales:
+📌 Reglas importantes:
 - **Definición clave**: `subtotal_5` y `subtotal_10` son los **montos gravados (base imponible, sin IVA)**.
 - Si el documento **solo muestra el IVA** y no el gravado:
-  - Calcula: `subtotal_10 = iva_10 * 11`.
-  - Calcula: `subtotal_5  = iva_5  * 21`.
-- Si hay columna de IVA por ítem, úsala como fuente de verdad; si no hay, usa el IVA único del resumen; si tampoco hay, asume exento.
+  - Calcula: `subtotal_10 = iva_10 * 10`.
+  - Calcula: `subtotal_5  = iva_5  * 20`.
 - Respeta montos y decimales tal como están impresos. No conviertas moneda.
-Reglas adicionales sobre condición de venta:
-- El campo `condicion_venta` debe ser exactamente `"CONTADO"` o `"CREDITO"`, según figure en la factura.
+- El campo `condicion_venta` debe ser exactamente `"CONTADO"` o `"CREDITO"`.
 - El campo `tipo_documento` debe ser `"CO"` si es CONTADO, o `"CR"` si es CREDITO.
+- **Moneda**: "GS" para Guaraníes, "USD" para Dólares (mantener decimales para USD).
 """.strip()
 
 def build_xml_prompt(xml_content: str) -> str:
-    schema = json.dumps(base_text_schema(), ensure_ascii=False, indent=2)
+    # Esquema simplificado para XML - solo campos esenciales
+    simplified_schema = {
+        "fecha": "YYYY-MM-DD",
+        "numero_factura": "XXX-XXX-XXXXXXX",
+        "ruc_emisor": "XXXXXXXX-X",
+        "nombre_emisor": "Razón social completa",
+        "condicion_venta": "CONTADO o CREDITO",
+        "tipo_documento": "CO o CR",
+        "tipo_cambio": "None o valor si está en moneda extranjera",
+        "subtotal_exentas": 0,
+        "subtotal_5": 0,      # gravado 5% sin IVA
+        "iva_5": 0,
+        "subtotal_10": 0,     # gravado 10% sin IVA
+        "iva_10": 0,
+        "monto_total": 0,
+        "timbrado": "None o NumTim",
+        "cdc": "None o CDC (DE Id)",
+        "ruc_cliente": "None o ruc cliente",
+        "nombre_cliente": "None o nombre cliente",
+        "email_cliente": "None o email cliente",
+        "moneda": "GS PYG o USD",
+        "actividad_economica": None,
+        "productos": [
+            {
+                "articulo": "descripción del producto/servicio",
+                "cantidad": 1,
+                "precio_unitario": 0,
+                "total": 0,
+                "iva": 0
+            }
+        ]
+    }
+    
+    schema = json.dumps(simplified_schema, ensure_ascii=False, indent=2)
+    
     return f"""
-A continuación se provee el contenido de un XML de factura electrónica paraguaya.
-Devuelve **solo** un JSON válido con la siguiente estructura, sin texto adicional:
+Analiza este XML de factura electrónica paraguaya y devuelve **solo** un JSON válido:
 
 {schema}
 
-Reglas de totales:
-- `subtotal_5` y `subtotal_10` son los **gravados sin IVA**.
-- Si el XML solo provee IVA discriminado y no el gravado:
-  - `subtotal_10 = iva_10 * 11`
-  - `subtotal_5  = iva_5  * 21`
+📌 Reglas importantes:
+- `subtotal_5` y `subtotal_10` son los **montos gravados sin IVA**
+- Si solo hay IVA: `subtotal_10 = iva_10 * 10`, `subtotal_5 = iva_5 * 20`
+- Moneda: "GS" para Guaraníes, "USD" para Dólares
+- No convertir monedas, usar valores exactos del XML
 
 XML:
 ```xml
 {xml_content}
+```
 """.strip()
 
 def messages_user_only(prompt: str) -> list[dict]:
