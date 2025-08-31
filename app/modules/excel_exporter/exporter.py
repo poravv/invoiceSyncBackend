@@ -6,6 +6,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 
 import pandas as pd
+from decimal import Decimal, ROUND_HALF_UP
 
 from app.models.models import InvoiceData, ExcelFileInfo
 from app.config.settings import settings
@@ -18,6 +19,8 @@ from .utils import (
     formatear_email_origen,
     generar_detalle_articulos,
     list_excel_files,
+    round_bucket,
+    q0,
 )
 from .formatting import write_summary_sheet, apply_ascont_formatting
 
@@ -81,31 +84,80 @@ class ExcelExporterASCONT:
                 # descripcion_base = getattr(inv, "descripcion_factura", "") or ""
                 # descripcion = f"{descripcion_base}\n{detalle}" if detalle else descripcion_base
 
-                articulos_str = ", ".join(
-                    p.get("articulo", "").strip() if isinstance(p, dict) else str(getattr(p, "articulo", "")).strip()
-                    for p in (inv.productos or [])
-                    if (p.get("articulo") if isinstance(p, dict) else getattr(p, "articulo", "")).strip()
-                )
+                # Construir lista de artículos, sin duplicados y limpios
+                articulos_list = []
+                for p in (inv.productos or []):
+                    a = (p.get("articulo") if isinstance(p, dict) else getattr(p, "articulo", "")) or ""
+                    a = str(a).strip()
+                    if not a:
+                        continue
+                    if a not in articulos_list:
+                        articulos_list.append(a)
 
                 descripcion_base = getattr(inv, "descripcion_factura", "") or ""
 
-                # Combinar con la base si existe
-                if descripcion_base and articulos_str:
-                    descripcion = f"{descripcion_base} - {articulos_str}"
+                # Evitar duplicar: no agregar artículos ya presentes en la base
+                if articulos_list:
+                    base_lower = descripcion_base.lower()
+                    articulos_faltantes = [a for a in articulos_list if a.lower() not in base_lower]
+                else:
+                    articulos_faltantes = []
+
+                if descripcion_base and articulos_faltantes:
+                    descripcion = f"{descripcion_base} - {', '.join(articulos_faltantes)}"
                 elif descripcion_base:
                     descripcion = descripcion_base
                 else:
-                    descripcion = articulos_str
+                    descripcion = ", ".join(articulos_list)
 
-                # Decide enteros vs decimales por moneda
-                use_ints = (str(getattr(inv, "moneda", "PYG")).upper() != "USD")
+                # Decide GS (enteros) vs otras (2 decimales)
+                is_gs = (str(getattr(inv, "moneda", "GS")).upper() in {"GS", "PYG"})
 
-                # Si ya traes gravados calculados desde el procesador/normalizador:
-                gra10 = parse_monto(getattr(inv, "gravado_10", inv.subtotal_10), enteros=use_ints)
-                gra5  = parse_monto(getattr(inv, "gravado_5", inv.subtotal_5), enteros=use_ints)
-                iva10 = parse_monto(inv.iva_10, enteros=use_ints)
-                iva5  = parse_monto(inv.iva_5, enteros=use_ints)
-                exen  = parse_monto(inv.subtotal_exentas, enteros=use_ints)
+                # Helpers de redondeo determinista
+                def q2(x):
+                    d = Decimal(str(x or 0))
+                    return float(d.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+
+                # Tomar valores base como float
+                g10f = float(getattr(inv, "gravado_10", inv.subtotal_10) or 0)
+                g5f  = float(getattr(inv, "gravado_5", inv.subtotal_5) or 0)
+                i10f = float(getattr(inv, "iva_10", 0) or 0)
+                i5f  = float(getattr(inv, "iva_5", 0) or 0)
+                exf  = float(getattr(inv, "subtotal_exentas", 0) or 0)
+                totalf = float(getattr(inv, "monto_total", 0) or (g10f+i10f+g5f+i5f+exf))
+
+                if is_gs:
+                    # Enteros asegurando base+iva=total por bucket
+                    g10i, i10i = round_bucket(g10f, i10f)
+                    g5i,  i5i  = round_bucket(g5f, i5f)
+                    exi = q0(exf)
+                    total_i = q0(totalf)
+                    sum_i = g10i + i10i + g5i + i5i + exi
+                    diff = total_i - sum_i
+                    if diff != 0:
+                        # ajustar al mayor bucket
+                        buckets = [("g10", g10i), ("g5", g5i), ("ex", exi)]
+                        buckets.sort(key=lambda x: x[1], reverse=True)
+                        if buckets[0][0] == "g10": g10i += diff
+                        elif buckets[0][0] == "g5": g5i += diff
+                        else: exi += diff
+                    gra10 = g10i; iva10 = i10i; gra5 = g5i; iva5 = i5i; exen = exi
+                    monto_total_cell = g10i + i10i + g5i + i5i + exi
+                else:
+                    # 2 decimales con HALF_UP y cierre de suma
+                    g10 = q2(g10f); i10 = q2(i10f); g5 = q2(g5f); i5 = q2(i5f); exn = q2(exf)
+                    total_2 = q2(totalf)
+                    sum_2 = q2(g10 + i10 + g5 + i5 + exn)
+                    diff = round(Decimal(str(total_2)) - Decimal(str(sum_2)), 2)
+                    if diff != 0:
+                        # ajustar al mayor bucket (por valor absoluto)
+                        buckets = [("g10", g10), ("g5", g5), ("ex", exn)]
+                        buckets.sort(key=lambda x: abs(x[1]), reverse=True)
+                        if buckets[0][0] == "g10": g10 = q2(g10 + float(diff))
+                        elif buckets[0][0] == "g5": g5 = q2(g5 + float(diff))
+                        else: exn = q2(exn + float(diff))
+                    gra10 = g10; iva10 = i10; gra5 = g5; iva5 = i5; exen = exn
+                    monto_total_cell = q2(g10 + i10 + g5 + i5 + exn)
 
                 ascont_rows.append({
                     "fecha": fecha_str,
@@ -133,8 +185,7 @@ class ExcelExporterASCONT:
                     ),
                     "email_origen": inv.email_origen, #formatear_email_origen(getattr(inv, "email_origen", "")),
                     "procesado_en": inv.procesado_en.strftime("%d/%m/%Y %H:%M:%S") if getattr(inv, "procesado_en", None) else "",
-                    "monto_total": parse_monto(getattr(inv, "monto_total", 0) or (gra10 + gra5 + exen + iva10 + iva5),
-                                               enteros=use_ints),
+                    "monto_total": monto_total_cell,
                 })
 
                 # productos
@@ -158,6 +209,7 @@ class ExcelExporterASCONT:
                         "cantidad": cantidad,
                         "precio_unitario": precio_u,
                         "total": total,
+                        "moneda": (getattr(inv, "moneda", "GS") or "GS"),
                     })
 
             # merge con existente (si lo hay)
@@ -206,6 +258,7 @@ class ExcelExporterASCONT:
                 dfp_comb = dfp_new
 
             with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
+                # Escribimos NUMÉRICOS para permitir fórmulas en Excel.
                 df_comb.to_excel(writer, sheet_name="Facturas ASCONT", index=False)
                 dfp_comb.to_excel(writer, sheet_name="Productos", index=False)
                 write_summary_sheet(writer, df_comb, year_month)

@@ -91,6 +91,12 @@ class OpenAIProcessor:
                 except Exception:
                     return None
 
+            def _is_valid_cdc(value: str | None) -> bool:
+                if not value:
+                    return False
+                s = str(value).replace(' ', '').replace('-', '')
+                return len(s) == 44 and s.isdigit()
+
             # 1) Intentar parser nativo SIFEN (rápido y determinista)
             try:
                 from .xml_parser import parse_paraguayan_xml
@@ -123,9 +129,22 @@ class OpenAIProcessor:
                         )
                     except Exception:
                         pass
+                    # Aceptamos el resultado nativo aunque CDC falte; registramos advertencia.
+                    if not _is_valid_cdc(getattr(invoice, 'cdc', '')):
+                        logger.warning("CDC no detectado/ inválido tras parseo nativo. Se mantiene resultado nativo.")
                     return invoice
                 else:
-                    logger.info("Parser nativo no suficiente, fallback a OpenAI")
+                    # Intentar diagnosticar por qué no cumplió mínimos
+                    try:
+                        cdc_probe = _extract_cdc_id(xml_content)
+                        fields_present = list(native.keys()) if isinstance(native, dict) else []
+                        missing = [k for k in ['fecha','numero_factura','ruc_emisor'] if not (native or {}).get(k)]
+                        logger.info(
+                            "Parser nativo no suficiente, fallback a OpenAI | cdc_en_Id=%s | faltantes=%s | presentes=%s",
+                            bool(cdc_probe), missing, fields_present[:12]
+                        )
+                    except Exception:
+                        logger.info("Parser nativo no suficiente, fallback a OpenAI")
             except Exception as e:
                 logger.warning("Parser nativo falló: %s. Se usa OpenAI como fallback", e)
 
@@ -147,6 +166,9 @@ class OpenAIProcessor:
                 data['cdc'] = cdc_id
             invoice = _coerce_invoice_model(data, email_metadata)
             invoice = validate_and_enhance_with_cdc(invoice)
+            # Aceptamos resultado OpenAI aunque el CDC falte; registramos advertencia.
+            if not _is_valid_cdc(getattr(invoice, 'cdc', '')):
+                logger.warning("CDC no detectado/ inválido tras OpenAI XML. Se mantiene resultado OpenAI.")
             return invoice
         except Exception as e:
             logger.exception("Error procesando XML: %s", e)

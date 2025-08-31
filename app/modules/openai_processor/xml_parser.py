@@ -21,6 +21,41 @@ class ParaguayanXMLParser:
             'dsig': 'http://www.w3.org/2000/09/xmldsig#'
         }
 
+    # -----------------------
+    # Helpers numéricos robustos
+    # -----------------------
+    def _to_float(self, value: Optional[str]) -> float:
+        """Convierte strings con formato ES/EN a float.
+        Acepta 7400.00 o 7400,00 o 1.234,56 o 1,234.56.
+        """
+        if value is None:
+            return 0.0
+        s = str(value).strip().replace(' ', '')
+        if not s:
+            return 0.0
+        try:
+            if ',' in s and '.' in s:
+                # El último separador es el decimal
+                if s.rfind(',') > s.rfind('.'):
+                    # decimal=',' → quitar puntos, coma→punto
+                    s = s.replace('.', '')
+                    s = s.replace(',', '.')
+                else:
+                    # decimal='.' → quitar comas
+                    s = s.replace(',', '')
+            elif ',' in s:
+                # solo coma → decimal
+                s = s.replace(',', '.')
+            # else: solo punto o ninguno
+            return float(s)
+        except Exception:
+            import re
+            s2 = re.sub(r'[^0-9\.-]', '', s)
+            try:
+                return float(s2)
+            except Exception:
+                return 0.0
+
     def can_parse(self, xml_content: str) -> bool:
         try:
             root = ET.fromstring(xml_content)
@@ -28,9 +63,19 @@ class ParaguayanXMLParser:
                 return True
             if self._find_element_by_name(root, 'DE') is not None:
                 return True
+            logger.warning("XML nativo: no se encontró nodo 'DE' ni raíz compatible (rDE/rLoteDE)")
             return False
         except Exception as e:
-            logger.debug(f"XML no puede ser parseado nativamente: {e}")
+            logger.warning(f"XML nativo: error al parsear/leer XML: {e}")
+            # Intento de recuperación: parsear solo el fragmento <DE>...</DE>
+            frag = self._extract_de_fragment(xml_content)
+            if frag:
+                try:
+                    ET.fromstring(frag)
+                    logger.info("XML nativo: recuperación por fragmento <DE> exitosa")
+                    return True
+                except Exception as e2:
+                    logger.warning(f"XML nativo: recuperación por fragmento falló: {e2}")
             return False
 
     def _find_element_by_name(self, element: ET.Element, name: str) -> Optional[ET.Element]:
@@ -59,10 +104,17 @@ class ParaguayanXMLParser:
 
     def parse_xml(self, xml_content: str) -> Tuple[bool, Dict[str, Any]]:
         try:
-            root = ET.fromstring(xml_content)
+            try:
+                root = ET.fromstring(xml_content)
+            except Exception:
+                frag = self._extract_de_fragment(xml_content)
+                if not frag:
+                    logger.warning("XML nativo: no se pudo recuperar fragmento <DE>")
+                    return False, {}
+                root = ET.fromstring(frag)
             de_element = self._find_element_by_name(root, 'DE')
             if de_element is None:
-                logger.debug("No se encontró elemento DE en el XML")
+                logger.warning("XML nativo: estructura SIFEN inválida: falta elemento 'DE'")
                 return False, {}
             data = self._extract_basic_data(de_element)
             self._extract_operation_data(de_element, data)
@@ -77,7 +129,7 @@ class ParaguayanXMLParser:
                 logger.info("✅ XML parseado exitosamente de forma nativa")
                 return True, data
             else:
-                logger.warning("⚠️ XML parseado pero faltan datos mínimos")
+                logger.warning("⚠️ XML nativo: parseado pero faltan datos mínimos requeridos (fecha, numero_factura, ruc_emisor)")
                 return False, data
         except Exception as e:
             logger.error(f"Error parseando XML nativamente: {e}")
@@ -122,6 +174,13 @@ class ParaguayanXMLParser:
         moneda = self._find_element_by_name_in_de(de_element, 'cMoneOpe')
         if moneda is not None and moneda.text:
             data['moneda'] = moneda.text
+        # Tipo de cambio (si viene en el XML SIFEN)
+        ti_cam = self._find_element_by_name_in_de(de_element, 'dTiCam')
+        if ti_cam is not None and ti_cam.text:
+            try:
+                data['tipo_cambio'] = float(str(ti_cam.text).replace(',', '.'))
+            except Exception:
+                pass
 
     def _extract_entity_data(self, de_element: ET.Element, data: Dict[str, Any]):
         ruc_em = self._find_element_by_name_in_de(de_element, 'dRucEm')
@@ -187,11 +246,8 @@ class ParaguayanXMLParser:
         return el.text.strip() if el is not None and el.text else None
 
     def _get_float(self, element: ET.Element, tag: str) -> Optional[float]:
-        try:
-            txt = self._get_text(element, tag)
-            return float(txt.replace(',', '')) if txt else 0.0
-        except Exception:
-            return 0.0
+        txt = self._get_text(element, tag)
+        return self._to_float(txt)
 
     def _extract_items_and_totals(self, de_element: ET.Element, data: Dict[str, Any]):
         total_fields = {
@@ -210,10 +266,10 @@ class ParaguayanXMLParser:
 
     def _validate_minimum_data(self, data: Dict[str, Any]) -> bool:
         required_fields = ['fecha', 'numero_factura', 'ruc_emisor']
-        for field in required_fields:
-            if field not in data or data[field] is None:
-                logger.debug(f"Campo requerido faltante: {field}")
-                return False
+        missing = [f for f in required_fields if not data.get(f)]
+        if missing:
+            logger.warning(f"XML nativo: faltan campos mínimos: {missing}")
+            return False
         return True
 
     def normalize_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -291,9 +347,38 @@ class ParaguayanXMLParser:
 def parse_paraguayan_xml(xml_content: str) -> Tuple[bool, Dict[str, Any]]:
     parser = ParaguayanXMLParser()
     if not parser.can_parse(xml_content):
-        logger.debug("XML no puede ser parseado nativamente")
+        logger.warning("XML nativo: no compatible con SIFEN o estructura inválida")
         return False, {}
     success, raw_data = parser.parse_xml(xml_content)
     if success:
         return True, parser.normalize_data(raw_data)
     return False, raw_data
+
+    # -------- Helpers de recuperación ---------
+def _find_fragment(content: str, start_tag: str, end_tag: str) -> Optional[str]:
+    try:
+        i = content.find(start_tag)
+        if i == -1:
+            return None
+        j = content.find(end_tag, i)
+        if j == -1:
+            return None
+        return content[i:j+len(end_tag)]
+    except Exception:
+        return None
+
+def _strip_ns_declaration(fragment: str) -> str:
+    # No modificamos namespaces; retornamos tal cual
+    return fragment
+
+def _wrap_if_needed(fragment: str) -> str:
+    # Si el fragmento empieza con <DE ...> podemos parsearlo solo
+    return fragment
+
+def _safe_de_fragment(xml_content: str) -> Optional[str]:
+    frag = _find_fragment(xml_content, '<DE ', '</DE>')
+    if frag:
+        return _wrap_if_needed(_strip_ns_declaration(frag))
+    return None
+
+setattr(ParaguayanXMLParser, "_extract_de_fragment", staticmethod(_safe_de_fragment))
