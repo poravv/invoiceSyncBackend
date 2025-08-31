@@ -37,17 +37,20 @@ class OpenAIProcessor:
     # ------------------------------------------------------------------ API --
     def extract_invoice_data(self, pdf_path: str, email_metadata: Optional[Dict[str, Any]] = None):
         """
-        1) Texto (rápido/preciso) → OpenAI
-        2) Si falla: Imagen (OCR/Vision) → OpenAI
-        3) Filtro de 'Nota de Remisión'
+        Estrategia simplificada (segura):
+        1) Procesar como Imagen (OCR/Vision) → OpenAI
+        2) Filtro de 'Nota de Remisión'
         """
         try:
-            if has_extractable_text_or_ocr(pdf_path):
-                result = self._process_as_text(pdf_path, email_metadata)
-                if result:
-                    return result
-                logger.warning("Texto falló → intentamos por imagen")
+            # NOTA: Se desactiva el camino 'texto' por solicitud.
+            # Mantener este bloque comentado por si se necesita reactivar en el futuro.
+            # if has_extractable_text_or_ocr(pdf_path):
+            #     result = self._process_as_text(pdf_path, email_metadata)
+            #     if result:
+            #         return result
+            #     logger.warning("Texto falló → intentamos por imagen")
 
+            # Ir directo a la estrategia por imagen (Vision/OCR)
             result = self._process_as_image(pdf_path, email_metadata)
             if result:
                 return result

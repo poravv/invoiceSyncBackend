@@ -395,9 +395,9 @@ class EmailProcessor:
                                 result.invoice_count += 1
                                 processed = True
 
-                        # PDF si no hubo XML válido
-                        elif pdf_path:
-                            logger.info("📄 Procesando PDF porque no se encontró XML")
+                        # Si el XML falló o no existe, intentar PDF
+                        if not processed and pdf_path:
+                            logger.info("📄 Procesando PDF como imagen (fallback o sin XML)")
                             inv = self.openai_processor.extract_invoice_data(pdf_path, email_meta_for_ai)
                             if inv:
                                 result.invoices.append(inv)
