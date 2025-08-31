@@ -34,11 +34,11 @@ class ParaguayanXMLParser:
             return False
 
     def _find_element_by_name(self, element: ET.Element, name: str) -> Optional[ET.Element]:
+        """Busca por localname exacto (ignora namespace). Evita confundir rDE con DE."""
         try:
-            for namespace_prefix, namespace_uri in self.namespaces.items():
-                qualified_name = f"{{{namespace_uri}}}{name}"
-                if element.tag == qualified_name or element.tag.endswith(name):
-                    return element
+            local = element.tag.split('}')[-1] if isinstance(element.tag, str) else ''
+            if local == name:
+                return element
             for child in element:
                 result = self._find_element_by_name(child, name)
                 if result is not None:
@@ -47,9 +47,14 @@ class ParaguayanXMLParser:
             logger.error(f"Error buscando el elemento {name}: {e}")
 
     def _find_element_by_name_in_de(self, de_element: ET.Element, name: str) -> Optional[ET.Element]:
+        """Busca descendiente por localname exacto dentro del nodo DE."""
         for child in de_element.iter():
-            if child.tag.endswith(name):
-                return child
+            try:
+                local = child.tag.split('}')[-1] if isinstance(child.tag, str) else ''
+                if local == name:
+                    return child
+            except Exception:
+                continue
         return None
 
     def parse_xml(self, xml_content: str) -> Tuple[bool, Dict[str, Any]]:
@@ -64,6 +69,10 @@ class ParaguayanXMLParser:
             self._extract_entity_data(de_element, data)
             self._extract_items(de_element, data)
             self._extract_items_and_totals(de_element, data)
+            try:
+                logger.debug(f"XML (raw extract) -> {data}")
+            except Exception:
+                pass
             if self._validate_minimum_data(data):
                 logger.info("✅ XML parseado exitosamente de forma nativa")
                 return True, data
@@ -81,7 +90,7 @@ class ParaguayanXMLParser:
             data['fecha'] = fecha_emision.text[:10] if len(fecha_emision.text) >= 10 else fecha_emision.text
         num_doc = self._find_element_by_name_in_de(de_element, 'dNumDoc')
         dEst = self._find_element_by_name_in_de(de_element, 'dEst')
-        dPunExp = self._f(de_element, 'dPunExp')
+        dPunExp = self._find_element_by_name_in_de(de_element, 'dPunExp')
         if num_doc is not None and dEst is not None and dPunExp is not None:
             data['numero_factura'] = (
                 (dEst.text or "") + ("-"+dPunExp.text or "") + ("-"+num_doc.text or "")
@@ -89,15 +98,15 @@ class ParaguayanXMLParser:
         num_tim = self._find_element_by_name_in_de(de_element, 'dNumTim')
         if num_tim is not None and num_tim.text:
             data['timbrado'] = num_tim.text
-        # Intentar extraer el CDC desde dCodSeg
-        cdc = self._find_element_by_name_in_de(de_element, 'dCodSeg')
-        if cdc is not None and cdc.text:
-            data['cdc'] = cdc.text
-        else:
-            # Si no se encontró, usar el atributo Id del nodo DE
-            cdc_attr = de_element.attrib.get('Id')
-            if cdc_attr:
+        # CDC: usar exclusivamente el atributo Id del nodo DE (44 dígitos numéricos)
+        cdc_attr = de_element.attrib.get('Id')
+        try:
+            if cdc_attr and cdc_attr.isdigit() and len(cdc_attr) == 44:
                 data['cdc'] = cdc_attr
+            else:
+                logger.debug(f"CDC no válido en atributo Id: {cdc_attr}")
+        except Exception:
+            logger.debug("No se pudo validar CDC desde atributo Id")
         return data
 
     def _extract_operation_data(self, de_element: ET.Element, data: Dict[str, Any]):
@@ -116,8 +125,12 @@ class ParaguayanXMLParser:
 
     def _extract_entity_data(self, de_element: ET.Element, data: Dict[str, Any]):
         ruc_em = self._find_element_by_name_in_de(de_element, 'dRucEm')
+        dv_em = self._find_element_by_name_in_de(de_element, 'dDVEmi')
         if ruc_em is not None and ruc_em.text:
-            data['ruc_emisor'] = ruc_em.text
+            if dv_em is not None and dv_em.text:
+                data['ruc_emisor'] = f"{ruc_em.text}-{dv_em.text}"
+            else:
+                data['ruc_emisor'] = ruc_em.text
         nom_em = self._find_element_by_name_in_de(de_element, 'dNomEmi')
         if nom_em is not None and nom_em.text:
             data['nombre_emisor'] = nom_em.text
@@ -125,11 +138,18 @@ class ParaguayanXMLParser:
         if act_eco is not None and act_eco.text:
             data['actividad_economica'] = act_eco.text
         ruc_rec = self._find_element_by_name_in_de(de_element, 'dRucRec')
+        dv_rec = self._find_element_by_name_in_de(de_element, 'dDVRec')
         if ruc_rec is not None and ruc_rec.text:
-            data['ruc_cliente'] = ruc_rec.text
+            if dv_rec is not None and dv_rec.text:
+                data['ruc_cliente'] = f"{ruc_rec.text}-{dv_rec.text}"
+            else:
+                data['ruc_cliente'] = ruc_rec.text
         nom_rec = self._find_element_by_name_in_de(de_element, 'dNomRec')
         if nom_rec is not None and nom_rec.text:
             data['nombre_cliente'] = nom_rec.text
+        email_rec = self._find_element_by_name_in_de(de_element, 'dEmailRec')
+        if email_rec is not None and email_rec.text:
+            data['email_cliente'] = email_rec.text
 
     def _extract_items(self, de_element: ET.Element, data: Dict[str, Any]):
         """
@@ -137,23 +157,25 @@ class ParaguayanXMLParser:
         en formato compatible con ProductoFactura (modelo Pydantic).
         """
         productos = []
-        for item_element in de_element.findall('.//gCamItem'):
+        # Iterar ignorando namespace
+        for item_element in de_element.iter():
+            if not (isinstance(item_element.tag, str) and item_element.tag.endswith('gCamItem')):
+                continue
+            desc = self._get_text(item_element, 'dDesProSer')
             producto = {
-                'codigo_interno': self._get_text(item_element, 'dCodInt'),
-                'descripcion': self._get_text(item_element, 'dDesProSer'),
-                'unidad_medida': self._get_text(item_element, 'cUniMed'),
+                'articulo': desc or '',
                 'cantidad': self._get_float(item_element, 'dCantProSer'),
                 'precio_unitario': self._get_float(item_element, 'dPUniProSer'),
-                'total_bruto': self._get_float(item_element, 'dTotBruOpeItem'),
-                'total': self._get_float(item_element, 'dTotBruOpeItem'),  # alias para compatibilidad
-                'articulo': self._get_text(item_element, 'dDesProSer')     # alias para compatibilidad
+                'total': self._get_float(item_element, 'dTotBruOpeItem'),
             }
 
             cam_iva = self._find_element_by_name(item_element, 'gCamIVA')
             if cam_iva is not None:
-                producto['afectacion_iva'] = self._get_text(cam_iva, 'iAfecIVA')
-                producto['tasa_iva'] = self._get_float(cam_iva, 'dTasaIVA')
-                producto['iva'] = int(float(producto['tasa_iva'] or 0))
+                tasa = self._get_float(cam_iva, 'dTasaIVA')
+                try:
+                    producto['iva'] = int(float(tasa or 0))
+                except Exception:
+                    producto['iva'] = 0
 
             productos.append(producto)
 
@@ -195,24 +217,75 @@ class ParaguayanXMLParser:
         return True
 
     def normalize_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        normalized = {}
-        field_mapping = {
-            'fecha': 'fecha', 'numero_factura': 'numero_documento',
-            'ruc_emisor': 'ruc_proveedor', 'nombre_emisor': 'razon_social_proveedor',
-            'ruc_cliente': 'ruc_cliente', 'nombre_cliente': 'nombre_cliente',
-            'monto_total': 'total_factura', 'subtotal_5': 'gravado_5',
-            'subtotal_10': 'gravado_10', 'subtotal_exentas': 'exento',
-            'iva_5': 'iva_5', 'iva_10': 'iva_10', 'iva': 'total_iva',
-            'timbrado': 'timbrado', 'cdc': 'cdc', 'moneda': 'moneda',
-            'condicion_venta': 'condicion_compra', 'actividad_economica': 'actividad_economica'
-        }
-        for k, v in field_mapping.items():
+        """
+        Normaliza al contrato esperado por InvoiceData.from_dict.
+        Nota: En este proyecto 'subtotal_5' y 'subtotal_10' representan la BASE (gravado),
+        es decir, los montos SIN IVA. El XML SIFEN provee tanto los subtotales con IVA (dSub5/dSub10)
+        como las bases (dBaseGrav5/dBaseGrav10). Usamos las bases para poblar 'subtotal_*'.
+        """
+        normalized: Dict[str, Any] = {}
+
+        # Copiar campos directos
+        for k in ['fecha', 'numero_factura', 'ruc_emisor', 'nombre_emisor',
+                  'condicion_venta', 'moneda', 'tipo_cambio', 'monto_total',
+                  'timbrado', 'cdc', 'ruc_cliente', 'nombre_cliente', 'email_cliente']:
             if k in data:
-                normalized[v] = data[k]
-        if 'condicion_compra' in normalized:
-            normalized['tipo_documento'] = "CR" if "CREDITO" in normalized['condicion_compra'].upper() else "CO"
-        if normalized.get('moneda') == 'PYG':
-            normalized['moneda'] = 'GS'
+                normalized[k] = data[k]
+
+        # Bases e IVA desde XML (preferir bases)
+        base5 = data.get('gravado_5') if data.get('gravado_5') is not None else None
+        base10 = data.get('gravado_10') if data.get('gravado_10') is not None else None
+        iva5 = data.get('iva_5') if data.get('iva_5') is not None else None
+        iva10 = data.get('iva_10') if data.get('iva_10') is not None else None
+
+        if base5 is not None:
+            normalized['subtotal_5'] = base5
+            normalized['gravado_5'] = base5
+        elif data.get('subtotal_5') is not None and iva5:
+            # Si solo vino subtotal (con IVA) e IVA, estimar base
+            normalized['subtotal_5'] = max(float(data['subtotal_5']) - float(iva5), 0.0)
+            normalized['gravado_5'] = normalized['subtotal_5']
+
+        if base10 is not None:
+            normalized['subtotal_10'] = base10
+            normalized['gravado_10'] = base10
+        elif data.get('subtotal_10') is not None and iva10:
+            normalized['subtotal_10'] = max(float(data['subtotal_10']) - float(iva10), 0.0)
+            normalized['gravado_10'] = normalized['subtotal_10']
+
+        if iva5 is not None:
+            normalized['iva_5'] = iva5
+        if iva10 is not None:
+            normalized['iva_10'] = iva10
+
+        # Exentas (no tienen IVA, pueden usarse tal cual)
+        if data.get('subtotal_exentas') is not None:
+            normalized['subtotal_exentas'] = data['subtotal_exentas']
+
+        # Productos al formato del modelo
+        productos = []
+        for p in data.get('productos', []) or []:
+            articulo = (p.get('articulo') or p.get('descripcion') or '')
+            try:
+                iva_val = int(float(p.get('iva', 0) or 0))
+            except Exception:
+                iva_val = 0
+            productos.append({
+                'articulo': articulo,
+                'cantidad': p.get('cantidad', 0),
+                'precio_unitario': p.get('precio_unitario', 0),
+                'total': p.get('total', 0),
+                'iva': iva_val,
+            })
+        if productos:
+            normalized['productos'] = productos
+
+        # descripcion_factura: concatenación breve de artículos
+        if productos and not normalized.get('descripcion_factura'):
+            articulos = [str(p.get('articulo', '')).strip() for p in productos if p.get('articulo')]
+            if articulos:
+                normalized['descripcion_factura'] = ', '.join(articulos[:10])  # limitar a 10 ítems
+
         return normalized
 
 def parse_paraguayan_xml(xml_content: str) -> Tuple[bool, Dict[str, Any]]:

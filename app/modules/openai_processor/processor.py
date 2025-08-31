@@ -10,6 +10,7 @@ from .image_utils import pdf_to_base64_first_page, ocr_from_base64_image
 from .prompts import build_text_prompt, build_image_prompt, build_xml_prompt, messages_user_only, messages_user_with_image
 from .json_utils import extract_and_normalize_json
 from .cdc import validate_and_enhance_with_cdc
+import xml.etree.ElementTree as ET
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,66 @@ class OpenAIProcessor:
             with open(xml_path, "r", encoding="utf-8") as f:
                 xml_content = f.read()
 
+            def _extract_cdc_id(xml_text: str) -> str | None:
+                try:
+                    root = ET.fromstring(xml_text)
+                    # Buscar nodo DE en cualquier namespace (localname == 'DE', no 'rDE')
+                    def _find_de(el: ET.Element):
+                        if isinstance(el.tag, str) and el.tag.split('}')[-1] == 'DE':
+                            return el
+                        for ch in el:
+                            r = _find_de(ch)
+                            if r is not None:
+                                return r
+                        return None
+                    de = _find_de(root)
+                    if de is not None:
+                        cid = de.attrib.get('Id')
+                        if cid and cid.isdigit() and len(cid) == 44:
+                            return cid
+                    return None
+                except Exception:
+                    return None
+
+            # 1) Intentar parser nativo SIFEN (rápido y determinista)
+            try:
+                from .xml_parser import parse_paraguayan_xml
+                ok, native = parse_paraguayan_xml(xml_content)
+                if ok:
+                    logger.info("XML parseado nativamente (SIFEN)")
+                    # Asegurar que CDC venga del atributo Id
+                    cdc_id = _extract_cdc_id(xml_content)
+                    if cdc_id:
+                        native['cdc'] = cdc_id
+                    try:
+                        logger.info(
+                            "XML nativo normalizado: fecha=%s, nro=%s, ruc_emisor=%s, nombre_emisor=%s, cond_venta=%s, moneda=%s, exentas=%s, g5=%s, iva5=%s, g10=%s, iva10=%s, total=%s, timbrado=%s, cdc=%s, ruc_cliente=%s, nombre_cliente=%s, productos=%s",
+                            native.get('fecha'), native.get('numero_factura'), native.get('ruc_emisor'), native.get('nombre_emisor'),
+                            native.get('condicion_venta'), native.get('moneda'), native.get('subtotal_exentas'), native.get('subtotal_5'), native.get('iva_5'),
+                            native.get('subtotal_10'), native.get('iva_10'), native.get('monto_total'), native.get('timbrado'), native.get('cdc'),
+                            native.get('ruc_cliente'), native.get('nombre_cliente'), len(native.get('productos') or [])
+                        )
+                    except Exception:
+                        pass
+                    invoice = _coerce_invoice_model(native, email_metadata)
+                    invoice = validate_and_enhance_with_cdc(invoice)
+                    try:
+                        logger.info(
+                            "Invoice mapeada: fecha=%s, nro=%s, ruc=%s, razon=%s, cond=%s, moneda=%s, gra5=%s, iva5=%s, gra10=%s, iva10=%s, exento=%s, total=%s, timbrado=%s, cdc=%s, productos=%s",
+                            getattr(invoice, 'fecha', None), getattr(invoice, 'numero_factura', ''), getattr(invoice, 'ruc_emisor', ''), getattr(invoice, 'nombre_emisor', ''),
+                            getattr(invoice, 'condicion_venta', ''), getattr(invoice, 'moneda', ''), getattr(invoice, 'gravado_5', 0), getattr(invoice, 'iva_5', 0),
+                            getattr(invoice, 'gravado_10', 0), getattr(invoice, 'iva_10', 0), getattr(invoice, 'subtotal_exentas', 0), getattr(invoice, 'monto_total', 0),
+                            getattr(invoice, 'timbrado', ''), getattr(invoice, 'cdc', ''), len(getattr(invoice, 'productos', []) or [])
+                        )
+                    except Exception:
+                        pass
+                    return invoice
+                else:
+                    logger.info("Parser nativo no suficiente, fallback a OpenAI")
+            except Exception as e:
+                logger.warning("Parser nativo falló: %s. Se usa OpenAI como fallback", e)
+
+            # 2) Fallback: usar OpenAI con prompt XML
             prompt = build_xml_prompt(xml_content)
             messages = messages_user_only(prompt)
 
@@ -76,15 +137,16 @@ class OpenAIProcessor:
                 max_tokens=self.cfg.max_tokens,
             )
             data = extract_and_normalize_json(raw)
-            
-            logger.info("Datos extraídos del XML: %s", data)
-
+            logger.info("Datos extraídos del XML (OpenAI): %s", data)
+            # Forzar CDC desde atributo Id si está presente
+            cdc_id = _extract_cdc_id(xml_content)
+            if cdc_id:
+                data['cdc'] = cdc_id
             invoice = _coerce_invoice_model(data, email_metadata)
             invoice = validate_and_enhance_with_cdc(invoice)
-            logger.info("Datos invoice: %s", invoice)
             return invoice
         except Exception as e:
-            logger.exception("Error procesando XML con OpenAI: %s", e)
+            logger.exception("Error procesando XML: %s", e)
             return None
 
     # ----------------------------------------------------------- Estrategias --

@@ -176,9 +176,28 @@ class ExcelExporterASCONT:
                     dfp_old = pd.DataFrame(columns=dfp_new.columns)
 
                 df_comb = pd.concat([df_old, df_new], ignore_index=True)
-                
-                # Evits que se dupliquen las facturas (mismo RUC+factura+CDC)
-                df_comb.drop_duplicates(subset=["ruc", "factura", "CDC"], keep="last", inplace=True)
+
+                # Deduplicación: si hay varias filas con mismo (ruc, factura),
+                # preferir la última con CDC válido de 44 dígitos; si ninguna válida, la última.
+                def _valid_cdc(val) -> bool:
+                    try:
+                        s = str(val or "").replace(" ", "").replace("-", "")
+                        return len(s) == 44 and s.isdigit()
+                    except Exception:
+                        return False
+
+                if not df_comb.empty and all(c in df_comb.columns for c in ["ruc", "factura"]):
+                    df_comb["__valid_cdc"] = df_comb["CDC"].apply(_valid_cdc) if "CDC" in df_comb.columns else False
+                    keep_indices = []
+                    for (_, _), grp in df_comb.groupby(["ruc", "factura"], dropna=False):
+                        gvalid = grp[grp["__valid_cdc"]] if "__valid_cdc" in grp.columns else pd.DataFrame()
+                        if not gvalid.empty:
+                            keep_indices.append(gvalid.index.max())  # última válida
+                        else:
+                            keep_indices.append(grp.index.max())      # última del grupo
+                    df_comb = df_comb.loc[sorted(set(keep_indices))].copy()
+                    if "__valid_cdc" in df_comb.columns:
+                        df_comb.drop(columns=["__valid_cdc"], inplace=True, errors="ignore")
 
                 dfp_comb = pd.concat([dfp_old, dfp_new], ignore_index=True)
                 dfp_comb.drop_duplicates(subset=["factura", "ruc", "articulo"], keep="last", inplace=True)

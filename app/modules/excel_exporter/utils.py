@@ -72,7 +72,8 @@ def formatear_cdc(cdc: Optional[str]) -> str:
     if not cdc:
         return ""
     limpio = cdc.replace(" ", "").replace("-", "")
-    if len(limpio) < 8:
+    # Solo aceptamos CDC válidos de 44 dígitos numéricos (SIFEN)
+    if not (len(limpio) == 44 and limpio.isdigit()):
         return cdc
     # separa cada 4 dígitos
     return " ".join(limpio[i:i+4] for i in range(0, len(limpio), 4))

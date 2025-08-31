@@ -163,6 +163,75 @@ async def upload_pdf(
             message=f"Error al procesar el archivo: {str(e)}"
         )
 
+@app.post("/upload-xml", response_model=ProcessResult)
+async def upload_xml(
+    file: UploadFile = File(...),
+    sender: Optional[str] = Form(None),
+    date: Optional[str] = Form(None)
+):
+    """
+    Sube un archivo XML SIFEN para procesarlo directamente con el parser nativo (fallback OpenAI).
+    """
+    if not (file.filename.lower().endswith('.xml')):
+        raise HTTPException(status_code=400, detail="Solo se aceptan archivos XML")
+
+    try:
+        # Guardar el archivo XML
+        xml_path = os.path.join(settings.TEMP_PDF_DIR, file.filename)
+        with open(xml_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        # Metadatos opcionales
+        email_meta = {
+            "sender": sender or "Carga manual",
+        }
+        if date:
+            try:
+                email_meta["date"] = datetime.strptime(date, "%Y-%m-%d")
+            except Exception:
+                logger.warning(f"Formato de fecha incorrecto: {date}")
+
+        # Procesar XML
+        invoice_data = invoice_sync.openai_processor.extract_invoice_data_from_xml(xml_path, email_meta)
+
+        invoices = [invoice_data] if invoice_data else []
+        if not invoices:
+            return ProcessResult(
+                success=False,
+                message="No se pudo extraer información desde el XML",
+                invoice_count=0,
+                invoices=[],
+                excel_files=[]
+            )
+
+        # Exportar a Excel
+        excel_path = invoice_sync.excel_exporter.export_invoices(invoices)
+        excel_files = [excel_path] if excel_path else []
+
+        if not excel_path:
+            return ProcessResult(
+                success=False,
+                message="Error al exportar a Excel",
+                invoice_count=1,
+                invoices=invoices,
+                excel_files=[]
+            )
+
+        return ProcessResult(
+            success=True,
+            message=f"Factura XML procesada correctamente. Excel: {excel_path}",
+            invoice_count=1,
+            invoices=invoices,
+            excel_files=excel_files
+        )
+
+    except Exception as e:
+        logger.error(f"Error al procesar el XML: {str(e)}")
+        return ProcessResult(
+            success=False,
+            message=f"Error al procesar el XML: {str(e)}"
+        )
+
 @app.get("/excel")
 async def get_excel():
     """

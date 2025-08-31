@@ -416,8 +416,8 @@ class EmailProcessor:
 
                                 low = downloaded_path.lower()
                                 inv = None
-                                if low.endswith(".xml") and "factura" in low:
-                                    logger.info("📄 XML detectado desde enlace, procesando como factura electrónica")
+                                if low.endswith(".xml"):
+                                    logger.info("📄 XML detectado desde enlace, procesando como factura electrónica (SIFEN si aplica)")
                                     inv = self.openai_processor.extract_invoice_data_from_xml(downloaded_path)
                                 elif low.endswith(".pdf"):
                                     logger.info("📄 PDF detectado desde enlace, procesando con OpenAI")
