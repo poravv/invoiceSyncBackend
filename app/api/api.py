@@ -13,6 +13,9 @@ from fastapi import Response
 from app.config.settings import settings
 from app.models.models import InvoiceData, EmailConfig, ProcessResult, JobStatus, ExcelFileInfo, ExcelFileList, MultiEmailConfig
 from app.main import InvoiceSync
+from app.modules.scheduler.processing_lock import PROCESSING_LOCK
+from app.modules.scheduler.task_queue import task_queue
+from app.modules.email_processor.storage import save_binary
 
 # Configurar logging
 logging.basicConfig(
@@ -90,6 +93,23 @@ async def process_emails(background_tasks: BackgroundTasks, run_async: bool = Fa
             message=f"Error al procesar correos: {str(e)}"
         )
 
+@app.post("/tasks/process")
+async def enqueue_process_emails():
+    """Encola una ejecución de procesamiento de correos y retorna un job_id."""
+    def _runner():
+        return invoice_sync.process_emails()
+
+    job_id = task_queue.enqueue("process_emails", _runner)
+    return {"job_id": job_id}
+
+@app.get("/tasks/{job_id}")
+async def get_task_status(job_id: str):
+    """Consulta el estado de un job enviado a la cola."""
+    job = task_queue.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job no encontrado")
+    return job
+
 @app.post("/upload", response_model=ProcessResult)
 async def upload_pdf(
     file: UploadFile = File(...),
@@ -115,30 +135,27 @@ async def upload_pdf(
         pdf_path = os.path.join(settings.TEMP_PDF_DIR, file.filename)
         with open(pdf_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        
+
         # Preparar metadatos
         email_meta = {
             "sender": sender or "Carga manual",
         }
-        
+
         # Convertir fecha si se proporciona
         if date:
             try:
                 email_meta["date"] = datetime.strptime(date, "%Y-%m-%d")
-            except:
+            except Exception:
                 logger.warning(f"Formato de fecha incorrecto: {date}")
-        
-        # Procesar con OpenAI
-        invoice_data = invoice_sync.process_pdf(pdf_path, email_meta)
-        
-        # Exportar a Excel
-        invoices = [invoice_data] if invoice_data else []
-        excel_path = invoice_sync.excel_exporter.export_invoices(invoices)
-        
-        excel_files = []
-        if excel_path:
-            excel_files = [excel_path]
-        
+
+        # Serializar extracción + exportación para no interferir con automatización
+        with PROCESSING_LOCK:
+            invoice_data = invoice_sync.openai_processor.extract_invoice_data(pdf_path, email_meta)
+            invoices = [invoice_data] if invoice_data else []
+            excel_path = invoice_sync.excel_exporter.export_invoices(invoices)
+
+        excel_files = [excel_path] if excel_path else []
+
         if not excel_path:
             return ProcessResult(
                 success=False,
@@ -147,7 +164,7 @@ async def upload_pdf(
                 invoices=invoices,
                 excel_files=[]
             )
-        
+
         return ProcessResult(
             success=True,
             message=f"Factura procesada correctamente. Excel: {excel_path}",
@@ -191,22 +208,23 @@ async def upload_xml(
             except Exception:
                 logger.warning(f"Formato de fecha incorrecto: {date}")
 
-        # Procesar XML
-        invoice_data = invoice_sync.openai_processor.extract_invoice_data_from_xml(xml_path, email_meta)
+        with PROCESSING_LOCK:
+            # Procesar XML
+            invoice_data = invoice_sync.openai_processor.extract_invoice_data_from_xml(xml_path, email_meta)
 
-        invoices = [invoice_data] if invoice_data else []
-        if not invoices:
-            return ProcessResult(
-                success=False,
-                message="No se pudo extraer información desde el XML",
-                invoice_count=0,
-                invoices=[],
-                excel_files=[]
-            )
+            invoices = [invoice_data] if invoice_data else []
+            if not invoices:
+                return ProcessResult(
+                    success=False,
+                    message="No se pudo extraer información desde el XML",
+                    invoice_count=0,
+                    invoices=[],
+                    excel_files=[]
+                )
 
-        # Exportar a Excel
-        excel_path = invoice_sync.excel_exporter.export_invoices(invoices)
-        excel_files = [excel_path] if excel_path else []
+            # Exportar a Excel
+            excel_path = invoice_sync.excel_exporter.export_invoices(invoices)
+            excel_files = [excel_path] if excel_path else []
 
         if not excel_path:
             return ProcessResult(
@@ -231,6 +249,86 @@ async def upload_xml(
             success=False,
             message=f"Error al procesar el XML: {str(e)}"
         )
+
+@app.post("/tasks/upload-pdf")
+async def enqueue_upload_pdf(
+    file: UploadFile = File(...),
+    sender: Optional[str] = Form(None),
+    date: Optional[str] = Form(None)
+):
+    """Encola el procesamiento de un PDF manual y retorna job_id."""
+    if not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="Solo se aceptan archivos PDF")
+
+    try:
+        file_bytes = await file.read()
+        pdf_path = save_binary(file_bytes, file.filename, force_pdf=True)
+        email_meta = {"sender": sender or "Carga manual"}
+        if date:
+            try:
+                email_meta["date"] = datetime.strptime(date, "%Y-%m-%d")
+            except Exception:
+                logger.warning(f"Formato de fecha incorrecto: {date}")
+
+        def _runner():
+            inv = invoice_sync.openai_processor.extract_invoice_data(pdf_path, email_meta)
+            invoices = [inv] if inv else []
+            path = invoice_sync.excel_exporter.export_invoices(invoices)
+            return ProcessResult(
+                success=bool(invoices and path),
+                message=(f"Factura procesada correctamente. Excel: {path}" if invoices and path else
+                         ("No se pudo extraer factura" if not invoices else "Error al exportar a Excel")),
+                invoice_count=len(invoices),
+                invoices=invoices,
+                excel_files=([path] if path else [])
+            )
+
+        job_id = task_queue.enqueue("upload_pdf", _runner)
+        return {"job_id": job_id}
+    except Exception as e:
+        logger.error(f"Error al encolar PDF: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/tasks/upload-xml")
+async def enqueue_upload_xml(
+    file: UploadFile = File(...),
+    sender: Optional[str] = Form(None),
+    date: Optional[str] = Form(None)
+):
+    """Encola el procesamiento de un XML manual y retorna job_id."""
+    if not file.filename.lower().endswith('.xml'):
+        raise HTTPException(status_code=400, detail="Solo se aceptan archivos XML")
+
+    try:
+        file_bytes = await file.read()
+        xml_path = save_binary(file_bytes, file.filename)
+        email_meta = {"sender": sender or "Carga manual"}
+        if date:
+            try:
+                email_meta["date"] = datetime.strptime(date, "%Y-%m-%d")
+            except Exception:
+                logger.warning(f"Formato de fecha incorrecto: {date}")
+
+        def _runner():
+            inv = invoice_sync.openai_processor.extract_invoice_data_from_xml(xml_path, email_meta)
+            invoices = [inv] if inv else []
+            if not invoices:
+                return ProcessResult(success=False, message="No se pudo extraer información desde el XML",
+                                    invoice_count=0, invoices=[], excel_files=[])
+            path = invoice_sync.excel_exporter.export_invoices(invoices)
+            return ProcessResult(
+                success=bool(path),
+                message=(f"Factura XML procesada correctamente. Excel: {path}" if path else "Error al exportar a Excel"),
+                invoice_count=len(invoices),
+                invoices=invoices,
+                excel_files=([path] if path else [])
+            )
+
+        job_id = task_queue.enqueue("upload_xml", _runner)
+        return {"job_id": job_id}
+    except Exception as e:
+        logger.error(f"Error al encolar XML: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/excel")
 async def get_excel():

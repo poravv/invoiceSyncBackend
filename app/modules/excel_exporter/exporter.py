@@ -7,6 +7,7 @@ from datetime import datetime
 
 import pandas as pd
 from decimal import Decimal, ROUND_HALF_UP
+import threading
 
 from app.models.models import InvoiceData, ExcelFileInfo
 from app.config.settings import settings
@@ -25,6 +26,7 @@ from .utils import (
 from .formatting import write_summary_sheet, apply_ascont_formatting
 
 logger = logging.getLogger(__name__)
+_EXPORT_LOCK = threading.Lock()
 
 class ExcelExporterASCONT:
     """
@@ -51,15 +53,16 @@ class ExcelExporterASCONT:
             return ""
 
         try:
-            by_month = group_invoices_by_month(invoices)
-            last_path = ""
-            for ym, invs in by_month.items():
-                logger.info("Procesando %d facturas para %s", len(invs), ym)
-                path = self.get_monthly_excel_path(ym)
-                if self._export_month(invs, path, ym):
-                    last_path = path
-                    logger.info("Archivo Excel generado: %s", path)
-            return last_path
+            with _EXPORT_LOCK:
+                by_month = group_invoices_by_month(invoices)
+                last_path = ""
+                for ym, invs in by_month.items():
+                    logger.info("Procesando %d facturas para %s", len(invs), ym)
+                    path = self.get_monthly_excel_path(ym)
+                    if self._export_month(invs, path, ym):
+                        last_path = path
+                        logger.info("Archivo Excel generado: %s", path)
+                return last_path
         except Exception as e:
             logger.error("export_invoices error: %s", e, exc_info=True)
             return ""

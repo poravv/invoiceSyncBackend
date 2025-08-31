@@ -10,6 +10,7 @@ from app.models.models import InvoiceData, ProcessResult, EmailConfig, JobStatus
 from app.modules.email_processor.email_processor import MultiEmailProcessor, EmailProcessor
 from app.modules.openai_processor.openai_processor import OpenAIProcessor
 from app.modules.excel_exporter.excel_exporter import ExcelExporter
+from app.modules.scheduler.processing_lock import PROCESSING_LOCK
 
 # Configurar logging
 logging.basicConfig(
@@ -66,13 +67,12 @@ class InvoiceSync:
         # Registrar inicio del procesamiento
         self._job_status.last_run = datetime.now().isoformat()
         
-        # Procesar correos (puede ser una o múltiples cuentas)
-        if hasattr(self.email_processor, 'process_all_emails'):
-            # Es MultiEmailProcessor
-            result = self.email_processor.process_all_emails()
-        else:
-            # Es EmailProcessor tradicional
-            result = self.email_processor.process_emails()
+        # Procesar correos serializadamente para evitar colisiones
+        with PROCESSING_LOCK:
+            if hasattr(self.email_processor, 'process_all_emails'):
+                result = self.email_processor.process_all_emails()
+            else:
+                result = self.email_processor.process_emails()
         
         # Actualizar estado del job
         self._job_status.last_result = result
@@ -91,7 +91,9 @@ class InvoiceSync:
             InvoiceData: Datos extraídos de la factura.
         """
         logger.info(f"Procesando PDF: {pdf_path}")
-        return self.openai_processor.extract_invoice_data(pdf_path, metadata)
+        # Serializar extracción para mantener coherencia con export posterior
+        with PROCESSING_LOCK:
+            return self.openai_processor.extract_invoice_data(pdf_path, metadata)
     
     def start_scheduled_job(self) -> JobStatus:
         """
