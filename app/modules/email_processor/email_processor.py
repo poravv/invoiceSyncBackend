@@ -19,6 +19,7 @@ from .imap_client import IMAPClient, decode_mime_header
 from .link_extractor import extract_links_from_message
 from .downloader import download_pdf_from_url
 from .storage import save_binary, sanitize_filename, ensure_dirs
+from .connection_pool import get_imap_pool
 
 
 from .dedup import deduplicate_invoices
@@ -254,6 +255,11 @@ class EmailProcessor:
         else:
             self.config = config
 
+        # Usar pool de conexiones en lugar de cliente directo
+        self.connection_pool = get_imap_pool()
+        self.current_connection = None
+        
+        # Mantener cliente legacy para compatibilidad (puede removerse después)
         self.client = IMAPClient(
             host=self.config.host, port=self.config.port,
             username=self.config.username, password=self.config.password, mailbox="INBOX"
@@ -262,13 +268,36 @@ class EmailProcessor:
         self.excel_exporter = ExcelExporter()
 
         ensure_dirs()
+        logger.info(f"✅ EmailProcessor inicializado con pool de conexiones para {self.config.username}")
 
-    # --------- IMAP high-level ---------
+    # --------- IMAP high-level con pool ---------
     def connect(self) -> bool:
-        return self.client.connect()
+        """Obtiene conexión del pool o crea una nueva."""
+        if self.current_connection and self.current_connection.test_connection():
+            return True
+        
+        self.current_connection = self.connection_pool.get_connection(self.config)
+        if self.current_connection:
+            logger.info(f"🔄 Conexión IMAP obtenida del pool para {self.config.username}")
+            return True
+        
+        logger.error(f"❌ No se pudo obtener conexión IMAP para {self.config.username}")
+        return False
 
     def disconnect(self):
-        self.client.close()
+        """Devuelve conexión al pool en lugar de cerrarla."""
+        if self.current_connection:
+            if self.connection_pool.return_connection(self.current_connection):
+                logger.debug(f"↩️ Conexión devuelta al pool para {self.config.username}")
+            else:
+                logger.warning(f"⚠️ No se pudo devolver conexión al pool para {self.config.username}")
+            self.current_connection = None
+
+    def _get_imap_connection(self):
+        """Obtiene la conexión IMAP actual."""
+        if self.current_connection:
+            return self.current_connection.connection
+        return None
 
     # --------- Search logic ---------
     def search_emails(self) -> List[str]:

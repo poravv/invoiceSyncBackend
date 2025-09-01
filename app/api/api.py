@@ -583,6 +583,131 @@ async def set_job_interval(payload: IntervalPayload):
         logger.error(f"Error al ajustar intervalo del job: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error al ajustar intervalo: {str(e)}")
 
+@app.get("/cache/stats")
+async def cache_stats():
+    """
+    Obtiene estadísticas del cache de OpenAI.
+    
+    Returns:
+        dict: Estadísticas del cache.
+    """
+    try:
+        if hasattr(invoice_sync.openai_processor, 'cache') and invoice_sync.openai_processor.cache:
+            stats = invoice_sync.openai_processor.cache.get_cache_stats()
+            return {
+                "cache_enabled": True,
+                **stats
+            }
+        else:
+            return {"cache_enabled": False, "message": "Cache no habilitado"}
+    except Exception as e:
+        logger.error(f"Error obteniendo estadísticas del cache: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error obteniendo estadísticas del cache: {str(e)}")
+
+@app.post("/cache/clear")
+async def clear_cache(older_than_hours: Optional[int] = None):
+    """
+    Limpia el cache de OpenAI.
+    
+    Args:
+        older_than_hours: Si se especifica, elimina solo cache más viejo que X horas
+    
+    Returns:
+        dict: Resultado de la limpieza.
+    """
+    try:
+        if hasattr(invoice_sync.openai_processor, 'cache') and invoice_sync.openai_processor.cache:
+            files_removed = invoice_sync.openai_processor.cache.clear_cache(older_than_hours)
+            return {
+                "success": True,
+                "files_removed": files_removed,
+                "message": f"Cache limpiado: {files_removed} archivos eliminados"
+            }
+        else:
+            return {"success": False, "message": "Cache no habilitado"}
+    except Exception as e:
+        logger.error(f"Error limpiando cache: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error limpiando cache: {str(e)}")
+
+@app.get("/imap/pool/stats")
+async def imap_pool_stats():
+    """
+    Obtiene estadísticas del pool de conexiones IMAP.
+    
+    Returns:
+        dict: Estadísticas del pool de conexiones.
+    """
+    try:
+        from app.modules.email_processor.connection_pool import get_imap_pool
+        pool = get_imap_pool()
+        stats = pool.get_pool_stats()
+        
+        return {
+            "pool_enabled": True,
+            "configurations": stats,
+            "total_pools": len(stats)
+        }
+    except Exception as e:
+        logger.error(f"Error obteniendo estadísticas del pool IMAP: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error obteniendo estadísticas del pool: {str(e)}")
+
+@app.get("/excel/stats")
+async def excel_stats():
+    """
+    Obtiene estadísticas del archivo Excel actual.
+    
+    Returns:
+        dict: Estadísticas del Excel.
+    """
+    try:
+        from app.modules.excel_exporter.incremental_exporter import IncrementalExcelExporter
+        exporter = IncrementalExcelExporter()
+        stats = exporter.get_stats()
+        
+        return {
+            "incremental_export_enabled": True,
+            **stats
+        }
+    except Exception as e:
+        logger.error(f"Error obteniendo estadísticas del Excel: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error obteniendo estadísticas del Excel: {str(e)}")
+
+@app.get("/health/detailed")
+async def detailed_health():
+    """
+    Health check comprensivo con métricas detalladas de todos los componentes.
+    
+    Returns:
+        dict: Estado detallado del sistema con métricas de performance.
+    """
+    try:
+        from app.modules.monitoring import get_health_checker
+        health_checker = get_health_checker()
+        health_report = await health_checker.comprehensive_health_check()
+        
+        return health_report
+    except Exception as e:
+        logger.error(f"Error en health check detallado: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en health check: {str(e)}")
+
+@app.get("/health/trends")
+async def health_trends():
+    """
+    Obtiene tendencias de salud del sistema basadas en histórico.
+    
+    Returns:
+        dict: Tendencias y métricas históricas.
+    """
+    try:
+        from app.modules.monitoring import get_health_checker
+        health_checker = get_health_checker()
+        trends = health_checker.get_health_trends()
+        
+        return trends
+    except Exception as e:
+        logger.error(f"Error obteniendo tendencias de salud: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error obteniendo tendencias: {str(e)}")
+
 def start():
     """Inicia el servidor API."""
     uvicorn.run(

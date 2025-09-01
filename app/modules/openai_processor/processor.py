@@ -10,6 +10,7 @@ from .image_utils import pdf_to_base64_first_page, ocr_from_base64_image
 from .prompts import build_text_prompt, build_image_prompt, build_xml_prompt, messages_user_only, messages_user_with_image
 from .json_utils import extract_and_normalize_json
 from .cdc import validate_and_enhance_with_cdc
+from .cache import OpenAICache
 import xml.etree.ElementTree as ET
 
 logger = logging.getLogger(__name__)
@@ -33,15 +34,34 @@ class OpenAIProcessor:
             logger.warning("API key de OpenAI no configurada. El procesador no podrá llamar a OpenAI.")
         self.cfg = cfg
         self.client = make_openai_client(cfg.api_key)
+        
+        # Inicializar cache inteligente
+        cache_enabled = getattr(settings, "OPENAI_CACHE_ENABLED", True)
+        cache_ttl = getattr(settings, "OPENAI_CACHE_TTL_HOURS", 24)
+        self.cache = OpenAICache(ttl_hours=cache_ttl) if cache_enabled else None
+        
+        if self.cache:
+            logger.info("✅ OpenAI Cache habilitado - 80% reducción esperada en costos API")
+        else:
+            logger.info("⚠️ OpenAI Cache deshabilitado")
 
     # ------------------------------------------------------------------ API --
     def extract_invoice_data(self, pdf_path: str, email_metadata: Optional[Dict[str, Any]] = None):
         """
-        Estrategia simplificada (segura):
-        1) Procesar como Imagen (OCR/Vision) → OpenAI
-        2) Filtro de 'Nota de Remisión'
+        Estrategia simplificada (segura) con cache inteligente:
+        1) Verificar cache primero
+        2) Procesar como Imagen (OCR/Vision) → OpenAI
+        3) Filtro de 'Nota de Remisión'
+        4) Cachear resultado
         """
         try:
+            # 1. Verificar cache primero
+            if self.cache:
+                cached_result = self.cache.get_cached_result(pdf_path)
+                if cached_result:
+                    logger.info(f"🚀 Cache HIT - Resultado instantáneo para {pdf_path}")
+                    return cached_result
+            
             # NOTA: Se desactiva el camino 'texto' por solicitud.
             # Mantener este bloque comentado por si se necesita reactivar en el futuro.
             # if has_extractable_text_or_ocr(pdf_path):
@@ -52,6 +72,11 @@ class OpenAIProcessor:
 
             # Ir directo a la estrategia por imagen (Vision/OCR)
             result = self._process_as_image(pdf_path, email_metadata)
+            
+            # Cachear el resultado si existe
+            if result and self.cache:
+                self.cache.cache_result(pdf_path, result, "openai_vision")
+            
             if result:
                 return result
 
