@@ -9,6 +9,7 @@ import shutil
 from datetime import datetime
 from fastapi.responses import FileResponse
 from fastapi import Response
+from pydantic import BaseModel
 
 from app.config.settings import settings
 from app.models.models import InvoiceData, EmailConfig, ProcessResult, JobStatus, ExcelFileInfo, ExcelFileList, MultiEmailConfig
@@ -16,6 +17,7 @@ from app.main import InvoiceSync
 from app.modules.scheduler.processing_lock import PROCESSING_LOCK
 from app.modules.scheduler.task_queue import task_queue
 from app.modules.email_processor.storage import save_binary
+from app.modules.prefs.prefs import get_auto_refresh as prefs_get_auto_refresh, set_auto_refresh as prefs_set_auto_refresh
 
 # Configurar logging
 logging.basicConfig(
@@ -47,6 +49,21 @@ app.add_middleware(
 
 # Instancia global del procesador
 invoice_sync = InvoiceSync()
+
+# Payloads
+class IntervalPayload(BaseModel):
+    minutes: int
+
+# Preferencias UI
+class AutoRefreshPayload(BaseModel):
+    enabled: bool
+    interval_ms: int = 30000
+    uid: Optional[str] = None
+
+class AutoRefreshPref(BaseModel):
+    uid: str
+    enabled: bool
+    interval_ms: int
 
 # Tarea en segundo plano para procesar correos
 def process_emails_task():
@@ -556,6 +573,16 @@ async def job_status():
     """
     return invoice_sync.get_job_status()
 
+@app.post("/job/interval", response_model=JobStatus)
+async def set_job_interval(payload: IntervalPayload):
+    """Ajusta el intervalo (minutos) del job de automatización."""
+    try:
+        status = invoice_sync.update_job_interval(payload.minutes)
+        return status
+    except Exception as e:
+        logger.error(f"Error al ajustar intervalo del job: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al ajustar intervalo: {str(e)}")
+
 def start():
     """Inicia el servidor API."""
     uvicorn.run(
@@ -567,3 +594,26 @@ def start():
 
 if __name__ == "__main__":
     start()
+
+# -----------------------------
+# Preferencias (UI / Auto‑refresh)
+# -----------------------------
+
+@app.get("/prefs/auto-refresh", response_model=AutoRefreshPref)
+async def get_auto_refresh(uid: Optional[str] = Query(default="global")):
+    try:
+        data = prefs_get_auto_refresh(uid) or {"enabled": False, "interval_ms": 30000}
+        return AutoRefreshPref(uid=uid, enabled=bool(data.get("enabled", False)), interval_ms=int(data.get("interval_ms", 30000)))
+    except Exception as e:
+        logger.error(f"Error al obtener preferencia auto-refresh: {e}")
+        raise HTTPException(status_code=500, detail="No se pudo obtener preferencia")
+
+@app.post("/prefs/auto-refresh", response_model=AutoRefreshPref)
+async def set_auto_refresh(payload: AutoRefreshPayload):
+    try:
+        uid = payload.uid or "global"
+        data = prefs_set_auto_refresh(uid, payload.enabled, payload.interval_ms)
+        return AutoRefreshPref(uid=uid, enabled=bool(data.get("enabled", False)), interval_ms=int(data.get("interval_ms", 30000)))
+    except Exception as e:
+        logger.error(f"Error al guardar preferencia auto-refresh: {e}")
+        raise HTTPException(status_code=500, detail="No se pudo guardar preferencia")

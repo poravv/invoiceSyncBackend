@@ -137,6 +137,19 @@ class InvoiceSync:
             self._job_status.next_run = self._calculate_next_run()
         
         return self._job_status
+
+    def update_job_interval(self, minutes: int) -> JobStatus:
+        try:
+            minutes = max(1, int(minutes))
+        except Exception:
+            minutes = self._job_status.interval_minutes
+
+        # delegar al procesador subyacente
+        if hasattr(self.email_processor, 'set_interval_minutes'):
+            self.email_processor.set_interval_minutes(minutes)
+        # actualizar estado interno
+        self._job_status.interval_minutes = minutes
+        return self.get_job_status()
     
     def _calculate_next_run(self) -> str:
         """

@@ -213,6 +213,17 @@ class MultiEmailProcessor:
             "last_result": getattr(self._scheduler, "last_result", None)
         }
 
+    def set_interval_minutes(self, minutes: int):
+        try:
+            minutes = max(1, int(minutes))
+        except Exception:
+            minutes = settings.JOB_INTERVAL_MINUTES
+        settings.JOB_INTERVAL_MINUTES = minutes
+        if self._scheduler and self._scheduler.is_running:
+            # actualizar intervalo en caliente
+            self._scheduler.interval_minutes = minutes
+        return {"ok": True, "interval_minutes": minutes}
+
 
 # =========================
 #  EmailProcessor (single)
@@ -512,4 +523,23 @@ class EmailProcessor:
         res = self.process_emails()
         (logger.info if res.success else logger.error)(res.message)
         return res
+
+    # Permitir ajustar el intervalo para el scheduler basado en 'schedule'
+    def set_interval_minutes(self, minutes: int):
+        from app.config.settings import settings as _settings
+        try:
+            minutes = max(1, int(minutes))
+        except Exception:
+            minutes = _settings.JOB_INTERVAL_MINUTES
+        _settings.JOB_INTERVAL_MINUTES = minutes
+        if getattr(self, "_job_running", False):
+            try:
+                import schedule
+                schedule.clear()
+            except Exception:
+                pass
+            # reiniciar con nuevo intervalo
+            logger.info(f"Reiniciando job con nuevo intervalo: {minutes} min")
+            schedule.every(minutes).minutes.do(self._run_job)
+        return {"ok": True, "interval_minutes": minutes}
     
