@@ -29,7 +29,14 @@ class IMAPClient:
             logger.info(f"username {self.username}")
 
             self.is_gmail = "imap.gmail.com" in (self.host or "").lower()
+            
+            # Crear conexión con timeout
             self.conn = imaplib.IMAP4_SSL(self.host, self.port)
+            
+            # Configurar timeout de socket para operaciones IMAP
+            import socket
+            self.conn.sock.settimeout(30.0)  # 30 segundos timeout
+            
             self.conn.login(self.username, self.password)
 
             # mailbox
@@ -81,11 +88,14 @@ class IMAPClient:
 
         # Sin términos: traemos todo según flag
         if not terms:
-            typ, data = self.conn.uid('SEARCH', *flag_args)
-            if typ == 'OK':
-                uids |= set(_decode_ids(data))
-            else:
-                logger.error(f"UID SEARCH {' '.join(flag_args)} falló: {typ}")
+            try:
+                typ, data = self.conn.uid('SEARCH', *flag_args)
+                if typ == 'OK':
+                    uids |= set(_decode_ids(data))
+                else:
+                    logger.error(f"UID SEARCH {' '.join(flag_args)} falló: {typ}")
+            except Exception as e:
+                logger.error(f"UID SEARCH error sin términos: {e}")
             return sorted(uids, key=lambda x: int(x))
 
         # Con términos: una búsqueda por término → unión
@@ -93,11 +103,24 @@ class IMAPClient:
             args = flag_args + ['SUBJECT', f'"{term}"']
             try:
                 logger.debug(f"IMAP UID SEARCH args: {args}")  # para auditar exactamente qué se envía
-                typ, data = self.conn.uid('SEARCH', *args)
-                if typ == 'OK':
-                    uids |= set(_decode_ids(data))
-                else:
-                    logger.error(f"UID SEARCH para term '{term}' falló: {typ}")
+                
+                # Aplicar timeout específico para la búsqueda
+                import socket
+                old_timeout = self.conn.sock.gettimeout()
+                self.conn.sock.settimeout(15.0)  # 15 segundos para búsqueda
+                
+                try:
+                    typ, data = self.conn.uid('SEARCH', *args)
+                    if typ == 'OK':
+                        uids |= set(_decode_ids(data))
+                    else:
+                        logger.error(f"UID SEARCH para term '{term}' falló: {typ}")
+                finally:
+                    # Restaurar timeout original
+                    self.conn.sock.settimeout(old_timeout)
+                    
+            except socket.timeout:
+                logger.error(f"Timeout en UID SEARCH para term '{term}'")
             except Exception as e:
                 logger.error(f"UID SEARCH error para term '{term}': {e}")
 
@@ -107,17 +130,32 @@ class IMAPClient:
         if not self.conn:
             return None
         try:
-            status, data = self.conn.uid('FETCH', email_uid, '(RFC822)')
-            # data esperado: [(b'<uid> (RFC822 {<len>}', b'<raw>'), b')']
-            if status != 'OK' or not data:
-                logger.error(f"❌ Error al obtener el correo UID {email_uid}: {status}")
+            # Aplicar timeout específico para fetch
+            import socket
+            old_timeout = self.conn.sock.gettimeout()
+            self.conn.sock.settimeout(20.0)  # 20 segundos para fetch
+            
+            try:
+                status, data = self.conn.uid('FETCH', email_uid, '(RFC822)')
+                # data esperado: [(b'<uid> (RFC822 {<len>}', b'<raw>'), b')']
+                if status != 'OK' or not data:
+                    logger.error(f"❌ Error al obtener el correo UID {email_uid}: {status}")
+                    return None
+                # Busca el tuple con el contenido real
+                for item in data:
+                    if isinstance(item, tuple) and len(item) >= 2:
+                        return email.message_from_bytes(item[1])
+                        
+                logger.error(f"❌ Formato inesperado en FETCH UID {email_uid}: {data!r}")
                 return None
-            # Busca el tuple con el contenido real
-            for item in data:
-                if isinstance(item, tuple) and len(item) >= 2:
-                    return email.message_from_bytes(item[1])
-            logger.error(f"❌ Formato inesperado en FETCH UID {email_uid}: {data!r}")
-            return None
+                
+            except socket.timeout:
+                logger.error(f"Timeout en FETCH UID {email_uid}")
+                return None
+            finally:
+                # Restaurar timeout original
+                self.conn.sock.settimeout(old_timeout)
+                
         except Exception as e:
             logger.error(f"❌ Error al hacer FETCH UID {email_uid}: {e}")
             return None
@@ -126,14 +164,28 @@ class IMAPClient:
         if not self.conn:
             return False
         try:
-            # ✅ Usar UID STORE
-            status, _ = self.conn.uid('STORE', email_uid, '+FLAGS', '(\\Seen)')
-            ok = status == 'OK'
-            if ok:
-                logger.info(f"Correo UID {email_uid} marcado como leído")
-            else:
-                logger.error(f"Error al marcar como leído UID {email_uid}: {status}")
-            return ok
+            # Aplicar timeout específico para mark_seen
+            import socket
+            old_timeout = self.conn.sock.gettimeout()
+            self.conn.sock.settimeout(10.0)  # 10 segundos para mark_seen
+            
+            try:
+                # ✅ Usar UID STORE
+                status, _ = self.conn.uid('STORE', email_uid, '+FLAGS', '(\\Seen)')
+                ok = status == 'OK'
+                if ok:
+                    logger.info(f"Correo UID {email_uid} marcado como leído")
+                else:
+                    logger.error(f"Error al marcar como leído UID {email_uid}: {status}")
+                return ok
+                
+            except socket.timeout:
+                logger.error(f"Timeout al marcar como leído UID {email_uid}")
+                return False
+            finally:
+                # Restaurar timeout original
+                self.conn.sock.settimeout(old_timeout)
+                
         except Exception as e:
             logger.error(f"Error al marcar el correo UID {email_uid} como leído: {str(e)}")
             return False

@@ -4,6 +4,9 @@ import time
 import threading
 import logging
 import schedule
+import queue
+import pickle
+import email.utils
 from typing import List, Tuple, Dict, Any, Optional
 from datetime import datetime
 
@@ -80,18 +83,68 @@ class MultiEmailProcessor:
         for idx, cfg in enumerate(self.email_configs):
             logger.info(f"Procesando cuenta {idx + 1}/{len(self.email_configs)}: {cfg.username}")
             try:
-                single = EmailProcessor(EmailConfig(
-                    host=cfg.host, port=cfg.port, username=cfg.username, password=cfg.password,
-                    search_criteria=cfg.search_criteria, search_terms=cfg.search_terms or settings.EMAIL_SEARCH_TERMS
-                ))
-                r = single.process_emails()
-                if r.success:
-                    success_count += 1
-                    all_invoices.extend(r.invoices)
-                    logger.info(f"Cuenta {cfg.username}: {r.invoice_count} facturas procesadas")
-                else:
-                    errors.append(f"Error en {cfg.username}: {r.message}")
-                    logger.error(f"Error en cuenta {cfg.username}: {r.message}")
+                # Usar threading con timeout para evitar bloqueos indefinidos
+                import threading
+                import queue
+                
+                result_queue = queue.Queue()
+                
+                def process_account():
+                    try:
+                        single = EmailProcessor(EmailConfig(
+                            host=cfg.host, port=cfg.port, username=cfg.username, password=cfg.password,
+                            search_criteria=cfg.search_criteria, search_terms=cfg.search_terms or settings.EMAIL_SEARCH_TERMS
+                        ))
+                        r = single.process_emails()
+                        # Serializar con pickle para preservar objetos complejos
+                        result_queue.put(pickle.dumps(('success', r)))
+                    except Exception as e:
+                        result_queue.put(pickle.dumps(('error', str(e))))
+                
+                # Ejecutar en thread separado con timeout
+                thread = threading.Thread(target=process_account)
+                thread.daemon = True
+                thread.start()
+                thread.join(timeout=120)  # 120 segundos timeout
+                
+                if thread.is_alive():
+                    # Thread aún ejecutándose - timeout
+                    errors.append(f"Timeout en {cfg.username}: procesamiento tomó más de 120 segundos")
+                    logger.error(f"Timeout al procesar cuenta {cfg.username}: procesamiento tomó más de 120 segundos")
+                    continue
+                
+                # Obtener resultado
+                try:
+                    pickled_result = result_queue.get_nowait()
+                    result_type, result_data = pickle.loads(pickled_result)
+                    if result_type == 'success':
+                        r = result_data
+                        if r.success:
+                            success_count += 1
+                            # Validar que las facturas sean objetos correctos
+                            valid_invoices = []
+                            for invoice in r.invoices:
+                                if isinstance(invoice, str):
+                                    logger.error(f"❌ Factura inválida (string): {invoice[:100]}...")
+                                    continue
+                                elif hasattr(invoice, '__dict__'):
+                                    valid_invoices.append(invoice)
+                                else:
+                                    logger.error(f"❌ Factura de tipo inválido: {type(invoice)}")
+                                    continue
+                            
+                            all_invoices.extend(valid_invoices)
+                            logger.info(f"Cuenta {cfg.username}: {len(valid_invoices)} facturas válidas procesadas")
+                        else:
+                            errors.append(f"Error en {cfg.username}: {r.message}")
+                            logger.error(f"Error en cuenta {cfg.username}: {r.message}")
+                    else:
+                        errors.append(f"Error en {cfg.username}: {result_data}")
+                        logger.error(f"Error al procesar cuenta {cfg.username}: {result_data}")
+                except queue.Empty:
+                    errors.append(f"Error en {cfg.username}: no se pudo obtener resultado")
+                    logger.error(f"Error al procesar cuenta {cfg.username}: no se pudo obtener resultado")
+                    
             except Exception as e:
                 errors.append(f"Error en {cfg.username}: {str(e)}")
                 logger.error(f"Error al procesar cuenta {cfg.username}: {str(e)}")
@@ -339,7 +392,7 @@ class EmailProcessor:
         if date_str:
             import email as pyemail
             try:
-                dt = pyemail.utils.parsedate_to_datetime(date_str)
+                dt = email.utils.parsedate_to_datetime(date_str)
             except Exception as e:
                 logger.warning(f"⚠️ Error al parsear fecha '{date_str}': {e}")
 

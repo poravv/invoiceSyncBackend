@@ -809,8 +809,123 @@ async def health_trends():
         logger.error(f"Error obteniendo tendencias de salud: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error obteniendo tendencias: {str(e)}")
 
+@app.post("/system/force-restart")
+async def force_system_restart():
+    """
+    Endpoint de emergencia para forzar reinicio del sistema cuando hay bloqueos.
+    
+    Returns:
+        dict: Confirmación de reinicio.
+    """
+    global invoice_sync
+    
+    try:
+        logger.warning("🚨 REINICIO DE EMERGENCIA SOLICITADO - Forzando limpieza del sistema")
+        
+        # Detener job programado si está corriendo
+        try:
+            invoice_sync.stop_scheduled_job()
+            logger.info("✅ Job programado detenido")
+        except Exception as e:
+            logger.warning(f"⚠️ Error deteniendo job: {e}")
+        
+        # Limpiar tareas pendientes
+        try:
+            task_queue.cleanup_old_tasks()
+            logger.info("✅ Tareas limpiadas")
+        except Exception as e:
+            logger.warning(f"⚠️ Error limpiando tareas: {e}")
+        
+        # Liberar lock de procesamiento
+        try:
+            if PROCESSING_LOCK.locked():
+                PROCESSING_LOCK.release()
+                logger.info("✅ Processing lock liberado")
+        except Exception as e:
+            logger.warning(f"⚠️ Error liberando lock: {e}")
+        
+        # Reinicializar invoice_sync
+        try:
+            invoice_sync = InvoiceSync()
+            logger.info("✅ InvoiceSync reinicializado")
+        except Exception as e:
+            logger.warning(f"⚠️ Error reinicializando InvoiceSync: {e}")
+        
+        return {
+            "success": True,
+            "message": "Sistema reiniciado exitosamente",
+            "timestamp": datetime.now().isoformat(),
+            "actions": [
+                "Job programado detenido",
+                "Tareas limpiadas", 
+                "Processing lock liberado",
+                "InvoiceSync reinicializado"
+            ]
+        }
+    except Exception as e:
+        logger.error(f"❌ Error en reinicio de emergencia: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en reinicio: {str(e)}")
+
+@app.get("/system/health")
+async def get_system_health():
+    """
+    Endpoint de salud del sistema con información detallada.
+    
+    Returns:
+        dict: Estado de salud del sistema.
+    """
+    try:
+        import psutil
+        import threading
+        
+        # Información básica del sistema
+        health_info = {
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "uptime_seconds": time.time() - getattr(app.state, 'start_time', time.time()),
+            
+            # Estado de threads
+            "active_threads": threading.active_count(),
+            "thread_names": [t.name for t in threading.enumerate()],
+            
+            # Estado de procesamiento
+            "processing_lock_acquired": PROCESSING_LOCK.locked(),
+            "pending_tasks": task_queue.get_pending_tasks_count(),
+            
+            # Job programado
+            "scheduled_job_running": invoice_sync.get_job_status().get("running", False),
+            
+            # Memoria y CPU
+            "memory_usage_mb": psutil.Process().memory_info().rss / 1024 / 1024,
+            "cpu_percent": psutil.Process().cpu_percent(),
+        }
+        
+        # Determinar estado general
+        if health_info["active_threads"] > 20:
+            health_info["status"] = "warning"
+            health_info["warning"] = "Alto número de threads activos"
+        elif health_info["memory_usage_mb"] > 500:
+            health_info["status"] = "warning"  
+            health_info["warning"] = "Alto uso de memoria"
+        elif health_info["processing_lock_acquired"] and health_info["pending_tasks"] == 0:
+            health_info["status"] = "warning"
+            health_info["warning"] = "Processing lock adquirido sin tareas pendientes"
+            
+        return health_info
+        
+    except Exception as e:
+        logger.error(f"Error obteniendo salud del sistema: {str(e)}")
+        return {
+            "status": "error",
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e)
+        }
+
 def start():
     """Inicia el servidor API."""
+    # Guardar tiempo de inicio
+    app.state.start_time = time.time()
+    
     uvicorn.run(
         "app.api.api:app",
         host=settings.API_HOST,
