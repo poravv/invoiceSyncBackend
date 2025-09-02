@@ -4,6 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 import logging
 import uvicorn
+import uuid
+import time
 from typing import List, Optional
 import shutil
 from datetime import datetime
@@ -110,9 +112,56 @@ async def process_emails(background_tasks: BackgroundTasks, run_async: bool = Fa
             message=f"Error al procesar correos: {str(e)}"
         )
 
+@app.post("/process-direct")
+async def process_emails_direct():
+    """Procesa correos directamente sin cola de tareas (modo simple)."""
+    try:
+        # Ejecutar procesamiento directamente
+        result = invoice_sync.process_emails()
+        
+        if result and hasattr(result, 'success') and result.success:
+            return {
+                "success": True,
+                "message": result.message,
+                "invoice_count": getattr(result, 'invoice_count', 0)
+            }
+        else:
+            return {
+                "success": False,
+                "message": getattr(result, 'message', 'Error en el procesamiento'),
+                "invoice_count": 0
+            }
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
 @app.post("/tasks/process")
 async def enqueue_process_emails():
     """Encola una ejecución de procesamiento de correos y retorna un job_id."""
+    
+    # Verificar si el job automático está ejecutándose
+    job_status = invoice_sync.get_job_status()
+    if job_status.running:
+        # Retornar error inmediatamente si el job automático está activo
+        job_id = str(uuid.uuid4().hex)
+        task_queue._jobs[job_id] = {
+            'job_id': job_id,
+            'action': 'process_emails',
+            'status': 'error',
+            'created_at': time.time(),
+            'started_at': time.time(),
+            'finished_at': time.time(),
+            'message': 'No se puede procesar manualmente mientras la automatización esté activa. Detenga la automatización primero.',
+            'result': ProcessResult(
+                success=False,
+                message='No se puede procesar manualmente mientras la automatización esté activa. Detenga la automatización primero.',
+                invoice_count=0,
+                processed_emails=0
+            ),
+            '_func': None,
+        }
+        return {"job_id": job_id}
+    
     def _runner():
         return invoice_sync.process_emails()
 
@@ -126,6 +175,58 @@ async def get_task_status(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job no encontrado")
     return job
+
+@app.delete("/tasks/cleanup")
+async def cleanup_old_tasks():
+    """Limpia tareas antiguas que están atoradas."""
+    cleanup_count = 0
+    current_time = time.time()
+    
+    # Limpiar tareas que llevan más de 1 hora atoradas
+    with task_queue._lock:
+        jobs_to_remove = []
+        for job_id, job in task_queue._jobs.items():
+            if job.get('status') == 'running':
+                created_at = job.get('created_at', current_time)
+                # Si la tarea lleva más de 1 hora "running", marcarla como error
+                if current_time - created_at > 3600:  # 1 hora
+                    job['status'] = 'error'
+                    job['message'] = 'Tarea cancelada por tiempo excesivo'
+                    job['finished_at'] = current_time
+                    cleanup_count += 1
+                    
+            # Eliminar tareas completadas que tengan más de 24 horas
+            elif job.get('status') in ['done', 'error']:
+                created_at = job.get('created_at', current_time)
+                if current_time - created_at > 86400:  # 24 horas
+                    jobs_to_remove.append(job_id)
+                    cleanup_count += 1
+        
+        # Remover tareas antiguas
+        for job_id in jobs_to_remove:
+            del task_queue._jobs[job_id]
+    
+    return {"message": f"Se limpiaron {cleanup_count} tareas", "cleaned_count": cleanup_count}
+
+@app.get("/tasks/debug")
+async def debug_tasks():
+    """Debug endpoint para ver el estado de todas las tareas."""
+    current_time = time.time()
+    task_info = []
+    
+    with task_queue._lock:
+        for job_id, job in task_queue._jobs.items():
+            job_copy = {k: v for k, v in job.items() if k != '_func'}
+            created_at = job.get('created_at', current_time)
+            running_time = current_time - created_at
+            job_copy['running_time_seconds'] = running_time
+            task_info.append(job_copy)
+    
+    return {
+        "total_tasks": len(task_info),
+        "tasks": task_info,
+        "processing_lock_available": not PROCESSING_LOCK.locked()
+    }
 
 @app.post("/upload", response_model=ProcessResult)
 async def upload_pdf(

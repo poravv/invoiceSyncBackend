@@ -73,14 +73,35 @@ class TaskQueue:
                 func = job.get('_func')
             # run outside lock but serialized with PROCESSING_LOCK
             try:
-                with PROCESSING_LOCK:
+                print(f"[TaskQueue] Intentando adquirir PROCESSING_LOCK para job {job_id}")
+                # Intentar adquirir el lock con timeout de 30 segundos
+                lock_acquired = PROCESSING_LOCK.acquire(timeout=30)
+                print(f"[TaskQueue] Lock adquirido: {lock_acquired} para job {job_id}")
+                
+                if not lock_acquired:
+                    # Si no se pudo adquirir el lock, marcar como error
+                    print(f"[TaskQueue] Timeout del lock para job {job_id}")
+                    with self._lock:
+                        job['status'] = 'error'
+                        job['message'] = 'No se pudo adquirir el lock de procesamiento (timeout de 30 segundos). Otro proceso puede estar ejecutándose.'
+                        job['finished_at'] = time.time()
+                    continue
+                
+                try:
+                    print(f"[TaskQueue] Ejecutando función para job {job_id}")
                     result = func() if callable(func) else None
-                with self._lock:
-                    job['result'] = result
-                    job['status'] = 'done'
-                    job['message'] = getattr(result, 'message', 'Completado') if result else 'Completado'
-                    job['finished_at'] = time.time()
+                    print(f"[TaskQueue] Función completada para job {job_id}")
+                    with self._lock:
+                        job['result'] = result
+                        job['status'] = 'done'
+                        job['message'] = getattr(result, 'message', 'Completado') if result else 'Completado'
+                        job['finished_at'] = time.time()
+                finally:
+                    print(f"[TaskQueue] Liberando lock para job {job_id}")
+                    PROCESSING_LOCK.release()
+                    
             except Exception as e:
+                print(f"[TaskQueue] Error en job {job_id}: {e}")
                 with self._lock:
                     job['status'] = 'error'
                     job['message'] = str(e)
