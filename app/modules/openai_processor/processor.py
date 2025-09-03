@@ -54,6 +54,8 @@ class OpenAIProcessor:
         3) Filtro de 'Nota de Remisión'
         4) Cachear resultado
         """
+        from app.modules.email_processor.errors import OpenAIFatalError, OpenAIRetryableError
+        
         try:
             # 1. Verificar cache primero
             if self.cache:
@@ -82,8 +84,28 @@ class OpenAIProcessor:
 
             logger.warning("Ambas estrategias fallaron")
             return None
+            
         except Exception as e:
-            logger.exception("Error en extract_invoice_data: %s", e)
+            error_msg = str(e).lower()
+            
+            # Detectar errores fatales de OpenAI
+            if any(fatal in error_msg for fatal in [
+                "invalid api key", "api key", "authentication", "unauthorized",
+                "insufficient quota", "quota exceeded", "billing", "error fatal"
+            ]):
+                logger.error(f"❌ Error FATAL de OpenAI: {e}")
+                raise OpenAIFatalError(f"Error fatal de OpenAI: {e}")
+                
+            # Detectar errores transitorios
+            elif any(retryable in error_msg for retryable in [
+                "timeout", "rate limit", "too many requests", "connection", 
+                "network", "server error", "503", "502", "504"
+            ]):
+                logger.warning(f"⚠️ Error transitorio de OpenAI: {e}")
+                raise OpenAIRetryableError(f"Error transitorio de OpenAI: {e}")
+            
+            # Otros errores - log y devolver None
+            logger.exception("❌ Error inesperado en extract_invoice_data: %s", e)
             return None
 
     def extract_invoice_data_from_xml(self, xml_path: str, email_metadata: dict | None = None):

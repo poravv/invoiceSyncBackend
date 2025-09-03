@@ -1,6 +1,8 @@
 import os
 import logging
 import time
+import signal
+import threading
 from typing import List, Dict, Any, Optional
 import argparse
 from datetime import datetime
@@ -57,22 +59,73 @@ class InvoiceSync:
     
     def process_emails(self) -> ProcessResult:
         """
-        Procesa correos electrónicos para extraer facturas.
+        Procesa correos electrónicos para extraer facturas con timeout de seguridad.
         
         Returns:
             ProcessResult: Resultado del procesamiento.
         """
-        logger.info("Iniciando procesamiento de correos")
+        logger.info("🚀 Iniciando procesamiento de correos con watchdog de seguridad")
         
         # Registrar inicio del procesamiento
         self._job_status.last_run = datetime.now().isoformat()
         
-        # Procesar correos serializadamente para evitar colisiones
-        with PROCESSING_LOCK:
-            if hasattr(self.email_processor, 'process_all_emails'):
-                result = self.email_processor.process_all_emails()
-            else:
-                result = self.email_processor.process_emails()
+        # Usar watchdog para evitar cuelgues indefinidos
+        import queue
+        result_queue = queue.Queue()
+        
+        def process_with_timeout():
+            try:
+                # Procesar correos serializadamente para evitar colisiones
+                with PROCESSING_LOCK:
+                    if hasattr(self.email_processor, 'process_all_emails'):
+                        result = self.email_processor.process_all_emails()
+                    else:
+                        result = self.email_processor.process_emails()
+                
+                result_queue.put(('success', result))
+                
+            except Exception as e:
+                logger.error(f"❌ Error en procesamiento: {e}")
+                result_queue.put(('error', str(e)))
+        
+        # Ejecutar procesamiento en thread separado con timeout global
+        process_thread = threading.Thread(target=process_with_timeout, daemon=True)
+        process_thread.start()
+        
+        # Timeout global de 10 minutos para todo el procesamiento
+        process_thread.join(timeout=600)
+        
+        if process_thread.is_alive():
+            logger.error("❌ TIMEOUT GLOBAL: El procesamiento tomó más de 10 minutos. Abortando...")
+            result = ProcessResult(
+                success=False,
+                message="Timeout global: El procesamiento fue abortado por seguridad (>10 min)",
+                invoice_count=0,
+                invoices=[],
+                excel_files=[]
+            )
+        else:
+            # Obtener resultado del thread
+            try:
+                result_type, result_data = result_queue.get_nowait()
+                if result_type == 'success':
+                    result = result_data
+                else:
+                    result = ProcessResult(
+                        success=False,
+                        message=f"Error en procesamiento: {result_data}",
+                        invoice_count=0,
+                        invoices=[],
+                        excel_files=[]
+                    )
+            except queue.Empty:
+                result = ProcessResult(
+                    success=False,
+                    message="Error: No se pudo obtener resultado del procesamiento",
+                    invoice_count=0,
+                    invoices=[],
+                    excel_files=[]
+                )
         
         # Actualizar estado del job
         self._job_status.last_result = result

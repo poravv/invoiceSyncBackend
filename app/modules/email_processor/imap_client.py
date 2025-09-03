@@ -1,6 +1,8 @@
 import imaplib
 import email
 import logging
+import socket
+import time
 from typing import List, Optional, Set
 from email.header import decode_header
 from email.message import Message
@@ -23,46 +25,104 @@ class IMAPClient:
         self.is_gmail: bool = False
 
     def connect(self) -> bool:
-        try:
-            logger.info(f"host {self.host}")
-            logger.info(f"port {self.port}")
-            logger.info(f"username {self.username}")
+        """Conecta con retry automático y timeouts robustos."""
+        max_retries = 3
+        retry_delay = 2  # segundos
+        
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Intento de conexión {attempt + 1}/{max_retries} - host: {self.host}, port: {self.port}, username: {self.username}")
 
-            self.is_gmail = "imap.gmail.com" in (self.host or "").lower()
-            
-            # Crear conexión con timeout
-            self.conn = imaplib.IMAP4_SSL(self.host, self.port)
-            
-            # Configurar timeout de socket para operaciones IMAP
-            import socket
-            self.conn.sock.settimeout(30.0)  # 30 segundos timeout
-            
-            self.conn.login(self.username, self.password)
+                self.is_gmail = "imap.gmail.com" in (self.host or "").lower()
+                
+                # Crear conexión con timeout de socket más agresivo
+                try:
+                    self.conn = imaplib.IMAP4_SSL(self.host, self.port)
+                except (socket.timeout, socket.gaierror, socket.error, OSError) as e:
+                    logger.warning(f"Error de conexión de red (intento {attempt + 1}): {e}")
+                    if attempt == max_retries - 1:
+                        logger.error(f"❌ Fallo de conexión después de {max_retries} intentos")
+                        return False
+                    time.sleep(retry_delay * (attempt + 1))  # Backoff exponencial
+                    continue
+                
+                # Configurar timeout de socket para operaciones IMAP
+                if hasattr(self.conn, 'sock') and self.conn.sock:
+                    self.conn.sock.settimeout(30.0)  # 30 segundos timeout
+                
+                # Login con manejo de errores específicos
+                try:
+                    self.conn.login(self.username, self.password)
+                except (socket.timeout, socket.error, imaplib.IMAP4.abort, imaplib.IMAP4.error) as e:
+                    logger.warning(f"Error de autenticación IMAP (intento {attempt + 1}): {e}")
+                    try:
+                        self.conn.close()
+                        self.conn.logout()
+                    except:
+                        pass
+                    self.conn = None
+                    if attempt == max_retries - 1:
+                        logger.error(f"❌ Error de autenticación después de {max_retries} intentos")
+                        return False
+                    time.sleep(retry_delay * (attempt + 1))
+                    continue
 
-            # mailbox
-            typ, _ = self.conn.select(self.mailbox)
-            if typ != "OK":
-                raise RuntimeError(f"No se pudo seleccionar mailbox: {self.mailbox}")
+                # Seleccionar mailbox
+                try:
+                    typ, _ = self.conn.select(self.mailbox)
+                    if typ != "OK":
+                        raise RuntimeError(f"No se pudo seleccionar mailbox: {self.mailbox}")
+                except (socket.timeout, socket.error, imaplib.IMAP4.abort, imaplib.IMAP4.error) as e:
+                    logger.warning(f"Error seleccionando mailbox (intento {attempt + 1}): {e}")
+                    try:
+                        self.conn.close()
+                        self.conn.logout()
+                    except:
+                        pass
+                    self.conn = None
+                    if attempt == max_retries - 1:
+                        logger.error(f"❌ Error seleccionando mailbox después de {max_retries} intentos")
+                        return False
+                    time.sleep(retry_delay * (attempt + 1))
+                    continue
 
-            logger.info(f"Conexión exitosa al correo {self.username} | is_gmail={self.is_gmail}")
-            return True
-        except Exception as e:
-            logger.error(f"Error al conectar al correo: {e}")
-            self.conn = None
-            return False
+                logger.info(f"✅ Conexión exitosa al correo {self.username} | is_gmail={self.is_gmail}")
+                return True
+                
+            except Exception as e:
+                logger.error(f"❌ Error inesperado en conexión (intento {attempt + 1}): {e}")
+                self.conn = None
+                if attempt == max_retries - 1:
+                    return False
+                time.sleep(retry_delay * (attempt + 1))
+        
+        return False
 
     def close(self):
+        """Cierra la conexión de forma segura."""
         if not self.conn:
             return
         try:
-            self.conn.close()
-        except Exception:
-            pass
-        try:
-            self.conn.logout()
-            logger.info("Desconexión exitosa del servidor de correo")
+            # Configurar timeout corto para cierre
+            if hasattr(self.conn, 'sock') and self.conn.sock:
+                self.conn.sock.settimeout(5.0)  # 5 segundos para cierre
+            
+            try:
+                self.conn.close()
+            except (socket.timeout, socket.error, imaplib.IMAP4.abort, imaplib.IMAP4.error):
+                # Ignorar errores de cierre
+                pass
+            
+            try:
+                self.conn.logout()
+                logger.info("✅ Desconexión exitosa del servidor de correo")
+            except (socket.timeout, socket.error, imaplib.IMAP4.abort, imaplib.IMAP4.error) as e:
+                logger.warning(f"⚠️ Error menor al desconectar del servidor de correo: {str(e)}")
+                
         except Exception as e:
-            logger.error(f"Error al desconectar del servidor de correo: {str(e)}")
+            logger.error(f"❌ Error inesperado al desconectar del servidor de correo: {str(e)}")
+        finally:
+            self.conn = None
 
     def search(self, subject_terms: List[str]) -> List[str]:
         """
@@ -105,9 +165,10 @@ class IMAPClient:
                 logger.debug(f"IMAP UID SEARCH args: {args}")  # para auditar exactamente qué se envía
                 
                 # Aplicar timeout específico para la búsqueda
-                import socket
-                old_timeout = self.conn.sock.gettimeout()
-                self.conn.sock.settimeout(15.0)  # 15 segundos para búsqueda
+                old_timeout = None
+                if hasattr(self.conn, 'sock') and self.conn.sock:
+                    old_timeout = self.conn.sock.gettimeout()
+                    self.conn.sock.settimeout(15.0)  # 15 segundos para búsqueda
                 
                 try:
                     typ, data = self.conn.uid('SEARCH', *args)
@@ -115,14 +176,24 @@ class IMAPClient:
                         uids |= set(_decode_ids(data))
                     else:
                         logger.error(f"UID SEARCH para term '{term}' falló: {typ}")
+                except (socket.timeout, socket.error) as e:
+                    logger.error(f"Timeout/error de red en UID SEARCH para term '{term}': {e}")
+                except (imaplib.IMAP4.abort, imaplib.IMAP4.error) as e:
+                    logger.error(f"Error IMAP en UID SEARCH para term '{term}': {e}")
                 finally:
                     # Restaurar timeout original
-                    self.conn.sock.settimeout(old_timeout)
+                    if old_timeout is not None and hasattr(self.conn, 'sock') and self.conn.sock:
+                        try:
+                            self.conn.sock.settimeout(old_timeout)
+                        except:
+                            pass
                     
             except socket.timeout:
                 logger.error(f"Timeout en UID SEARCH para term '{term}'")
+            except (socket.error, imaplib.IMAP4.abort, imaplib.IMAP4.error) as e:
+                logger.error(f"Error IMAP/red en UID SEARCH para term '{term}': {e}")
             except Exception as e:
-                logger.error(f"UID SEARCH error para term '{term}': {e}")
+                logger.error(f"Error inesperado en UID SEARCH para term '{term}': {e}")
 
         return sorted(uids, key=lambda x: int(x))
 
@@ -131,9 +202,10 @@ class IMAPClient:
             return None
         try:
             # Aplicar timeout específico para fetch
-            import socket
-            old_timeout = self.conn.sock.gettimeout()
-            self.conn.sock.settimeout(20.0)  # 20 segundos para fetch
+            old_timeout = None
+            if hasattr(self.conn, 'sock') and self.conn.sock:
+                old_timeout = self.conn.sock.gettimeout()
+                self.conn.sock.settimeout(20.0)  # 20 segundos para fetch
             
             try:
                 status, data = self.conn.uid('FETCH', email_uid, '(RFC822)')
@@ -149,15 +221,22 @@ class IMAPClient:
                 logger.error(f"❌ Formato inesperado en FETCH UID {email_uid}: {data!r}")
                 return None
                 
-            except socket.timeout:
-                logger.error(f"Timeout en FETCH UID {email_uid}")
+            except (socket.timeout, socket.error) as e:
+                logger.error(f"Timeout/error de red en FETCH UID {email_uid}: {e}")
+                return None
+            except (imaplib.IMAP4.abort, imaplib.IMAP4.error) as e:
+                logger.error(f"Error IMAP en FETCH UID {email_uid}: {e}")
                 return None
             finally:
                 # Restaurar timeout original
-                self.conn.sock.settimeout(old_timeout)
+                if old_timeout is not None and hasattr(self.conn, 'sock') and self.conn.sock:
+                    try:
+                        self.conn.sock.settimeout(old_timeout)
+                    except:
+                        pass
                 
         except Exception as e:
-            logger.error(f"❌ Error al hacer FETCH UID {email_uid}: {e}")
+            logger.error(f"❌ Error inesperado al hacer FETCH UID {email_uid}: {e}")
             return None
 
     def mark_seen(self, email_uid: str) -> bool:
@@ -165,29 +244,37 @@ class IMAPClient:
             return False
         try:
             # Aplicar timeout específico para mark_seen
-            import socket
-            old_timeout = self.conn.sock.gettimeout()
-            self.conn.sock.settimeout(10.0)  # 10 segundos para mark_seen
+            old_timeout = None
+            if hasattr(self.conn, 'sock') and self.conn.sock:
+                old_timeout = self.conn.sock.gettimeout()
+                self.conn.sock.settimeout(10.0)  # 10 segundos para mark_seen
             
             try:
                 # ✅ Usar UID STORE
                 status, _ = self.conn.uid('STORE', email_uid, '+FLAGS', '(\\Seen)')
                 ok = status == 'OK'
                 if ok:
-                    logger.info(f"Correo UID {email_uid} marcado como leído")
+                    logger.info(f"✅ Correo UID {email_uid} marcado como leído")
                 else:
-                    logger.error(f"Error al marcar como leído UID {email_uid}: {status}")
+                    logger.error(f"❌ Error al marcar como leído UID {email_uid}: {status}")
                 return ok
                 
-            except socket.timeout:
-                logger.error(f"Timeout al marcar como leído UID {email_uid}")
+            except (socket.timeout, socket.error) as e:
+                logger.error(f"Timeout/error de red al marcar como leído UID {email_uid}: {e}")
+                return False
+            except (imaplib.IMAP4.abort, imaplib.IMAP4.error) as e:
+                logger.error(f"Error IMAP al marcar como leído UID {email_uid}: {e}")
                 return False
             finally:
                 # Restaurar timeout original
-                self.conn.sock.settimeout(old_timeout)
+                if old_timeout is not None and hasattr(self.conn, 'sock') and self.conn.sock:
+                    try:
+                        self.conn.sock.settimeout(old_timeout)
+                    except:
+                        pass
                 
         except Exception as e:
-            logger.error(f"Error al marcar el correo UID {email_uid} como leído: {str(e)}")
+            logger.error(f"❌ Error inesperado al marcar el correo UID {email_uid} como leído: {str(e)}")
             return False
 
 

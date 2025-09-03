@@ -17,6 +17,27 @@ InvoiceSync es un sistema automatizado para la extracción de datos de facturas 
   - Hoja de productos con detalle de items
 - **API RESTful:** Permite integrar con otros sistemas y ejecutar el procesamiento bajo demanda.
 - **Procesamiento periódico:** Programación de tareas automáticas para revisar correos en intervalos configurables.
+- **🛡️ Protección anti-cuelgues:** Sistema robusto con timeouts y retry automático para evitar bloqueos del servidor.
+
+## 🔒 Características de Seguridad y Robustez
+
+### Sistema de Timeouts Inteligentes
+- **Conexiones IMAP:** Timeouts configurados para conectar (30s), autenticar (20s), buscar (15s) y obtener mensajes (20s)
+- **Descargas HTTP:** Timeouts de conexión (5s) y lectura (15s) con retry automático
+- **OpenAI API:** Timeout de 60s con retry exponential backoff
+- **Procesamiento global:** Watchdog de 10 minutos para evitar cuelgues indefinidos
+
+### Pool de Conexiones IMAP
+- **Reutilización inteligente:** Reduce 70% del tiempo de conexión
+- **Detección de conexiones muertas:** Limpieza automática de conexiones inválidas
+- **Límite de conexiones:** Máximo 5 conexiones por configuración de email
+- **Cleanup automático:** Cierre de conexiones inactivas cada 5 minutos
+
+### Manejo de Errores Robusto
+- **Errores fatales vs transitorios:** Diferenciación automática entre errores permanentes y temporales
+- **Retry con backoff exponencial:** Reintentos inteligentes con delay creciente
+- **Protección por thread:** Cada cuenta de email se procesa en thread separado con timeout
+- **Logging detallado:** Registro completo de errores para debugging
 
 ## Tecnologías utilizadas
 

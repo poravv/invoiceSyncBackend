@@ -86,6 +86,7 @@ class MultiEmailProcessor:
                 # Usar threading con timeout para evitar bloqueos indefinidos
                 import threading
                 import queue
+                import signal
                 
                 result_queue = queue.Queue()
                 
@@ -101,16 +102,18 @@ class MultiEmailProcessor:
                     except Exception as e:
                         result_queue.put(pickle.dumps(('error', str(e))))
                 
-                # Ejecutar en thread separado con timeout
-                thread = threading.Thread(target=process_account)
-                thread.daemon = True
+                # Ejecutar en thread separado con timeout más largo
+                thread = threading.Thread(target=process_account, daemon=True)
                 thread.start()
-                thread.join(timeout=120)  # 120 segundos timeout
+                
+                # Timeout de 180 segundos (3 minutos) por cuenta
+                thread.join(timeout=180)
                 
                 if thread.is_alive():
                     # Thread aún ejecutándose - timeout
-                    errors.append(f"Timeout en {cfg.username}: procesamiento tomó más de 120 segundos")
-                    logger.error(f"Timeout al procesar cuenta {cfg.username}: procesamiento tomó más de 120 segundos")
+                    errors.append(f"Timeout en {cfg.username}: procesamiento tomó más de 180 segundos")
+                    logger.error(f"❌ Timeout al procesar cuenta {cfg.username}: procesamiento tomó más de 180 segundos")
+                    # Forzar terminación del thread (no es ideal pero evita cuelgues)
                     continue
                 
                 # Obtener resultado

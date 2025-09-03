@@ -6,6 +6,7 @@ import imaplib
 import logging
 import time
 import threading
+import socket
 from typing import Dict, Optional, List
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -26,9 +27,28 @@ class IMAPConnection:
     def test_connection(self) -> bool:
         """Verifica si la conexión sigue activa."""
         try:
-            self.connection.noop()
-            return True
-        except Exception:
+            # Configurar timeout corto para test rápido
+            old_timeout = None
+            if hasattr(self.connection, 'sock') and self.connection.sock:
+                old_timeout = self.connection.sock.gettimeout()
+                self.connection.sock.settimeout(5.0)  # 5 segundos para test
+            
+            try:
+                self.connection.noop()
+                return True
+            except (socket.timeout, socket.error, imaplib.IMAP4.abort, imaplib.IMAP4.error, OSError) as e:
+                logger.warning(f"Test de conexión falló: {e}")
+                self.is_alive = False
+                return False
+            finally:
+                # Restaurar timeout original
+                if old_timeout is not None and hasattr(self.connection, 'sock') and self.connection.sock:
+                    try:
+                        self.connection.sock.settimeout(old_timeout)
+                    except:
+                        pass
+        except Exception as e:
+            logger.error(f"Error inesperado en test de conexión: {e}")
             self.is_alive = False
             return False
 
@@ -63,36 +83,72 @@ class IMAPConnectionPool:
         return f"{config.host}:{config.port}:{config.username}"
     
     def _create_connection(self, config: EmailConfig) -> Optional[IMAPConnection]:
-        """Crea una nueva conexión IMAP."""
-        try:
-            start_time = time.time()
-            
-            # Establecer conexión
-            if config.port == 993:
-                conn = imaplib.IMAP4_SSL(config.host, config.port)
-            else:
-                conn = imaplib.IMAP4(config.host, config.port)
-                if hasattr(config, 'use_ssl') and config.use_ssl:
-                    conn.starttls()
-            
-            # Autenticar
-            conn.login(config.username, config.password)
-            
-            connection_time = time.time() - start_time
-            config_key = self._get_config_key(config)
-            
-            imap_conn = IMAPConnection(
-                connection=conn,
-                config_key=config_key,
-                last_used=datetime.now()
-            )
-            
-            logger.info(f"✅ Nueva conexión IMAP creada para {config.username} en {connection_time:.2f}s")
-            return imap_conn
-            
-        except Exception as e:
-            logger.error(f"❌ Error creando conexión IMAP para {config.username}: {e}")
-            return None
+        """Crea una nueva conexión IMAP con retry automático."""
+        max_retries = 3
+        retry_delay = 2  # segundos
+        
+        for attempt in range(max_retries):
+            try:
+                start_time = time.time()
+                
+                # Establecer conexión con timeout
+                if config.port == 993:
+                    conn = imaplib.IMAP4_SSL(config.host, config.port)
+                else:
+                    conn = imaplib.IMAP4(config.host, config.port)
+                    if hasattr(config, 'use_ssl') and config.use_ssl:
+                        conn.starttls()
+                
+                # Configurar timeouts de socket
+                if hasattr(conn, 'sock') and conn.sock:
+                    conn.sock.settimeout(30.0)  # 30 segundos timeout general
+                
+                # Autenticar con timeout
+                try:
+                    conn.login(config.username, config.password)
+                except (socket.timeout, socket.error, imaplib.IMAP4.abort, imaplib.IMAP4.error) as e:
+                    logger.warning(f"Error de autenticación IMAP (intento {attempt + 1}/{max_retries}): {e}")
+                    try:
+                        conn.close()
+                        conn.logout()
+                    except:
+                        pass
+                    if attempt == max_retries - 1:
+                        raise
+                    time.sleep(retry_delay * (attempt + 1))  # Backoff exponencial
+                    continue
+                
+                connection_time = time.time() - start_time
+                config_key = self._get_config_key(config)
+                
+                imap_conn = IMAPConnection(
+                    connection=conn,
+                    config_key=config_key,
+                    last_used=datetime.now()
+                )
+                
+                logger.info(f"✅ Nueva conexión IMAP creada para {config.username} en {connection_time:.2f}s (intento {attempt + 1})")
+                return imap_conn
+                
+            except (socket.timeout, socket.error, socket.gaierror, OSError) as e:
+                logger.warning(f"Error de red IMAP (intento {attempt + 1}/{max_retries}) para {config.username}: {e}")
+                if attempt == max_retries - 1:
+                    logger.error(f"❌ Falló conexión IMAP después de {max_retries} intentos para {config.username}")
+                    return None
+                time.sleep(retry_delay * (attempt + 1))  # Backoff exponencial
+                
+            except (imaplib.IMAP4.abort, imaplib.IMAP4.error) as e:
+                logger.warning(f"Error IMAP (intento {attempt + 1}/{max_retries}) para {config.username}: {e}")
+                if attempt == max_retries - 1:
+                    logger.error(f"❌ Error IMAP después de {max_retries} intentos para {config.username}")
+                    return None
+                time.sleep(retry_delay * (attempt + 1))
+                
+            except Exception as e:
+                logger.error(f"❌ Error inesperado creando conexión IMAP para {config.username}: {e}")
+                return None
+        
+        return None
     
     def get_connection(self, config: EmailConfig) -> Optional[IMAPConnection]:
         """
@@ -201,11 +257,26 @@ class IMAPConnectionPool:
                     except ValueError:
                         pass
             
-            # Cerrar conexión
+            # Cerrar conexión de forma segura
             try:
-                imap_conn.connection.close()
-                imap_conn.connection.logout()
-            except:
+                # Configurar timeout corto para cierre
+                if hasattr(imap_conn.connection, 'sock') and imap_conn.connection.sock:
+                    imap_conn.connection.sock.settimeout(5.0)
+                
+                try:
+                    imap_conn.connection.close()
+                except (socket.timeout, socket.error, imaplib.IMAP4.abort, imaplib.IMAP4.error):
+                    # Ignorar errores de cierre
+                    pass
+                
+                try:
+                    imap_conn.connection.logout()
+                except (socket.timeout, socket.error, imaplib.IMAP4.abort, imaplib.IMAP4.error):
+                    # Ignorar errores de logout
+                    pass
+                    
+            except Exception:
+                # Ignorar cualquier error de cierre/logout
                 pass
             
             imap_conn.is_alive = False
@@ -213,6 +284,8 @@ class IMAPConnectionPool:
             
         except Exception as e:
             logger.error(f"Error cerrando conexión IMAP: {e}")
+            # Asegurar que se marque como no viva
+            imap_conn.is_alive = False
     
     def _cleanup_expired_connections(self):
         """Thread que limpia conexiones expiradas periódicamente."""
