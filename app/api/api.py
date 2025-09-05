@@ -6,7 +6,7 @@ import logging
 import uvicorn
 import uuid
 import time
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import shutil
 from datetime import datetime
 from fastapi.responses import FileResponse
@@ -20,6 +20,8 @@ from app.modules.scheduler.processing_lock import PROCESSING_LOCK
 from app.modules.scheduler.task_queue import task_queue
 from app.modules.email_processor.storage import save_binary
 from app.modules.prefs.prefs import get_auto_refresh as prefs_get_auto_refresh, set_auto_refresh as prefs_set_auto_refresh
+from app.modules.excel_exporter import ExcelExporterCompleto, MongoDBExporter
+from app.modules.mongo_query_service import get_mongo_query_service
 
 # Configurar logging
 logging.basicConfig(
@@ -586,6 +588,16 @@ async def test_email_config(config: MultiEmailConfig):
         return {"success": False, "message": f"Error: {str(e)}"}
 
 
+@app.get("/health")
+async def health_check():
+    """
+    Health check endpoint for container health checks.
+    
+    Returns:
+        dict: Simple health status.
+    """
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
 @app.get("/status")
 async def get_status():
     """
@@ -958,3 +970,708 @@ async def set_auto_refresh(payload: AutoRefreshPayload):
     except Exception as e:
         logger.error(f"Error al guardar preferencia auto-refresh: {e}")
         raise HTTPException(status_code=500, detail="No se pudo guardar preferencia")
+
+# -----------------------------
+# Exportadores Avanzados 
+# -----------------------------
+
+@app.post("/export/excel-completo")
+async def export_excel_completo(background_tasks: BackgroundTasks, run_async: bool = False):
+    """
+    Exporta TODAS las facturas en formato Excel completo con múltiples hojas.
+    Incluye detalles completos: productos, empresas, clientes, datos técnicos, etc.
+    """
+    try:
+        if run_async:
+            background_tasks.add_task(_export_completo_task)
+            return {
+                "success": True,
+                "message": "Exportación completa iniciada en segundo plano",
+                "export_type": "excel_completo"
+            }
+        else:
+            return await _export_completo_task()
+    except Exception as e:
+        logger.error(f"Error en export completo: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en export completo: {str(e)}")
+
+@app.post("/export/mongodb")
+async def export_to_mongodb(background_tasks: BackgroundTasks, run_async: bool = False):
+    """
+    Exporta TODAS las facturas a MongoDB en formato documental optimizado.
+    Ideal para análisis avanzado, reporting y consultas complejas.
+    """
+    try:
+        if run_async:
+            background_tasks.add_task(_export_mongodb_task)
+            return {
+                "success": True,
+                "message": "Exportación a MongoDB iniciada en segundo plano",
+                "export_type": "mongodb"
+            }
+        else:
+            return await _export_mongodb_task()
+    except Exception as e:
+        logger.error(f"Error en export MongoDB: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en export MongoDB: {str(e)}")
+
+@app.get("/export/excel-completo/list")
+async def list_excel_completo_files():
+    """
+    Lista archivos Excel completos disponibles.
+    """
+    try:
+        exporter = ExcelExporterCompleto()
+        files = exporter.get_available_excel_files()
+        return {
+            "success": True,
+            "export_type": "excel_completo",
+            "files": files,
+            "total_count": len(files)
+        }
+    except Exception as e:
+        logger.error(f"Error listando archivos completos: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error listando archivos: {str(e)}")
+
+@app.get("/export/excel-completo/{year_month}")
+async def download_excel_completo(year_month: str):
+    """
+    Descarga archivo Excel completo de un mes específico.
+    """
+    try:
+        # Validar formato
+        try:
+            datetime.strptime(year_month, "%Y-%m")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Formato de mes incorrecto. Use YYYY-MM")
+
+        exporter = ExcelExporterCompleto()
+        excel_path = exporter.get_excel_by_month(year_month)
+        
+        if not excel_path:
+            raise HTTPException(status_code=404, detail=f"Archivo Excel completo no encontrado para {year_month}")
+
+        filename = f"facturas_completas_{year_month}.xlsx"
+        
+        response = FileResponse(
+            path=excel_path,
+            filename=filename,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error descargando Excel completo: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error descargando archivo: {str(e)}")
+
+@app.post("/export/excel-completo/{year_month}")
+async def export_excel_completo_month(year_month: str, background_tasks: BackgroundTasks, run_async: bool = False):
+    """
+    Exporta facturas de un mes específico desde MongoDB al formato Excel completo.
+    Args:
+        year_month: Mes en formato YYYY-MM (ej: 2025-01)
+        run_async: Si true, ejecuta en segundo plano
+    """
+    try:
+        # Validar formato de fecha
+        try:
+            datetime.strptime(year_month, "%Y-%m")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Formato de mes inválido. Use YYYY-MM")
+        
+        if run_async:
+            background_tasks.add_task(_export_completo_month_task, year_month)
+            return {
+                "success": True,
+                "message": f"Exportación completa del mes {year_month} iniciada en segundo plano",
+                "export_type": "excel_completo",
+                "year_month": year_month
+            }
+        else:
+            return await _export_completo_month_task(year_month)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error en export completo por mes: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en export completo: {str(e)}")
+
+@app.get("/export/mongodb/stats")
+async def mongodb_export_stats():
+    """
+    Obtiene estadísticas de la base de datos MongoDB.
+    """
+    try:
+        exporter = MongoDBExporter()
+        try:
+            stats = exporter.get_statistics()
+            return {
+                "success": True,
+                "export_type": "mongodb",
+                "database_stats": stats
+            }
+        finally:
+            exporter.close_connections()
+    except Exception as e:
+        logger.error(f"Error obteniendo stats MongoDB: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error obteniendo estadísticas: {str(e)}")
+
+@app.post("/export/process-and-export")
+async def process_and_export_all(
+    background_tasks: BackgroundTasks,
+    export_types: List[str] = Query(default=["ascont"], description="Tipos de export: ascont, completo, mongodb"),
+    run_async: bool = False
+):
+    """
+    Procesa emails Y exporta en los formatos especificados.
+    
+    Args:
+        export_types: Lista de formatos de export ("ascont", "completo", "mongodb")
+        run_async: Si ejecutar en segundo plano
+    """
+    valid_types = {"ascont", "completo", "mongodb"}
+    invalid_types = set(export_types) - valid_types
+    if invalid_types:
+        raise HTTPException(status_code=400, detail=f"Tipos de export inválidos: {invalid_types}")
+    
+    try:
+        if run_async:
+            background_tasks.add_task(_process_and_export_task, export_types)
+            return {
+                "success": True,
+                "message": f"Procesamiento y exportación iniciados en segundo plano",
+                "export_types": export_types
+            }
+        else:
+            return await _process_and_export_task(export_types)
+    except Exception as e:
+        logger.error(f"Error en process-and-export: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en procesamiento: {str(e)}")
+
+# Funciones auxiliares para tareas en segundo plano
+
+async def _export_completo_task():
+    """Tarea para exportar Excel completo"""
+    try:
+        from app.config.export_config import get_excel_completo_config
+        from app.modules.mongo_query_service import get_mongo_query_service
+        
+        config = get_excel_completo_config()
+        current_month = datetime.now().strftime("%Y-%m")
+        
+        # Verificar si debe obtener datos desde MongoDB
+        if config.get("from_mongodb", True):
+            logger.info("🔍 Obteniendo facturas desde MongoDB para exportación completa")
+            mongo_service = get_mongo_query_service()
+            
+            # Obtener facturas del mes actual desde MongoDB
+            mongo_docs = mongo_service.get_invoices_by_month(current_month)
+            
+            if not mongo_docs:
+                return {
+                    "success": False,
+                    "message": f"No hay facturas en MongoDB para el mes {current_month}",
+                    "export_type": "excel_completo"
+                }
+            
+            # Convertir documentos MongoDB a objetos InvoiceData
+            invoices = []
+            for doc in mongo_docs:
+                invoice = _mongo_doc_to_invoice_data(doc)
+                if invoice:
+                    invoices.append(invoice)
+                    
+            logger.info("📄 Convertidas %d facturas desde MongoDB", len(invoices))
+        else:
+            # Usar facturas en memoria (modo legacy)
+            invoices = getattr(invoice_sync, '_last_processed_invoices', [])
+        
+        if not invoices:
+            return {
+                "success": False,
+                "message": "No hay facturas disponibles para exportar.",
+                "export_type": "excel_completo"
+            }
+        
+        exporter = ExcelExporterCompleto()
+        excel_path = exporter.export_invoices(invoices)
+        
+        if excel_path:
+            return {
+                "success": True,
+                "message": f"Excel completo generado exitosamente: {excel_path}",
+                "export_type": "excel_completo",
+                "file_path": excel_path,
+                "invoice_count": len(invoices)
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Error generando archivo Excel completo",
+                "export_type": "excel_completo"
+            }
+            
+    except Exception as e:
+        logger.error(f"Error en export completo task: {e}")
+        return {
+            "success": False,
+            "message": f"Error en exportación completa: {str(e)}",
+            "export_type": "excel_completo"
+        }
+
+async def _export_mongodb_task():
+    """Tarea para exportar a MongoDB"""
+    try:
+        # Obtener facturas para exportar
+        invoices = getattr(invoice_sync, '_last_processed_invoices', [])
+        
+        if not invoices:
+            return {
+                "success": False,
+                "message": "No hay facturas disponibles para exportar a MongoDB. Procese emails primero.",
+                "export_type": "mongodb"
+            }
+        
+        exporter = MongoDBExporter()
+        try:
+            result = exporter.export_invoices(invoices)
+            
+            return {
+                "success": True,
+                "message": f"Exportación a MongoDB completada: {result['inserted']} insertados, {result['updated']} actualizados",
+                "export_type": "mongodb",
+                "mongo_result": result,
+                "invoice_count": len(invoices)
+            }
+        finally:
+            exporter.close_connections()
+            
+    except Exception as e:
+        logger.error(f"Error en export MongoDB task: {e}")
+        return {
+            "success": False,
+            "message": f"Error en exportación MongoDB: {str(e)}",
+            "export_type": "mongodb"
+        }
+
+async def _process_and_export_task(export_types: List[str]):
+    """Tarea combinada: procesar emails y exportar en múltiples formatos"""
+    try:
+        # 1. Procesar emails primero
+        logger.info(f"🔄 Iniciando procesamiento de emails...")
+        process_result = invoice_sync.process_emails()
+        
+        if not process_result.success:
+            return {
+                "success": False,
+                "message": f"Error en procesamiento de emails: {process_result.message}",
+                "process_result": process_result,
+                "exports": []
+            }
+        
+        invoices = process_result.invoices or []
+        if not invoices:
+            return {
+                "success": False,
+                "message": "No se encontraron facturas para exportar",
+                "process_result": process_result,
+                "exports": []
+            }
+        
+        # Guardar facturas para otros exportadores
+        invoice_sync._last_processed_invoices = invoices
+        
+        # 2. Exportar en formatos solicitados
+        export_results = []
+        
+        for export_type in export_types:
+            try:
+                if export_type == "ascont":
+                    # Ya se hizo en process_emails()
+                    export_results.append({
+                        "type": "ascont",
+                        "success": True,
+                        "message": "Export ASCONT incluido en procesamiento",
+                        "files": process_result.excel_files or []
+                    })
+                    
+                elif export_type == "completo":
+                    logger.info(f"📊 Exportando Excel completo...")
+                    exporter = ExcelExporterCompleto()
+                    excel_path = exporter.export_invoices(invoices)
+                    
+                    export_results.append({
+                        "type": "completo",
+                        "success": bool(excel_path),
+                        "message": f"Excel completo: {excel_path}" if excel_path else "Error en Excel completo",
+                        "file_path": excel_path if excel_path else None
+                    })
+                    
+                elif export_type == "mongodb":
+                    logger.info(f"💾 Exportando a MongoDB...")
+                    exporter = MongoDBExporter()
+                    try:
+                        mongo_result = exporter.export_invoices(invoices)
+                        export_results.append({
+                            "type": "mongodb",
+                            "success": mongo_result['inserted'] + mongo_result['updated'] > 0,
+                            "message": f"MongoDB: {mongo_result['inserted']} insertados, {mongo_result['updated']} actualizados",
+                            "mongo_stats": mongo_result
+                        })
+                    finally:
+                        exporter.close_connections()
+                        
+            except Exception as e:
+                logger.error(f"Error en export {export_type}: {e}")
+                export_results.append({
+                    "type": export_type,
+                    "success": False,
+                    "message": f"Error en {export_type}: {str(e)}"
+                })
+        
+        # 3. Resultado final
+        successful_exports = sum(1 for r in export_results if r["success"])
+        
+        return {
+            "success": successful_exports > 0,
+            "message": f"Procesamiento completado: {len(invoices)} facturas, {successful_exports}/{len(export_types)} exports exitosos",
+            "process_result": process_result,
+            "exports": export_results,
+            "invoice_count": len(invoices)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error en process-and-export task: {e}")
+        return {
+            "success": False,
+            "message": f"Error en procesamiento combinado: {str(e)}",
+            "exports": []
+        }
+
+async def _export_completo_month_task(year_month: str):
+    """Tarea para exportar Excel completo de un mes específico desde MongoDB"""
+    try:
+        from app.modules.mongo_query_service import get_mongo_query_service
+        
+        logger.info(f"🔍 Exportando facturas del mes {year_month} desde MongoDB")
+        mongo_service = get_mongo_query_service()
+        
+        # Obtener facturas del mes específico desde MongoDB
+        mongo_docs = mongo_service.get_invoices_by_month(year_month)
+        
+        if not mongo_docs:
+            return {
+                "success": False,
+                "message": f"No hay facturas en MongoDB para el mes {year_month}",
+                "export_type": "excel_completo",
+                "year_month": year_month
+            }
+        
+        # Convertir documentos MongoDB a objetos InvoiceData
+        invoices = []
+        for doc in mongo_docs:
+            invoice = _mongo_doc_to_invoice_data(doc)
+            if invoice:
+                invoices.append(invoice)
+                
+        logger.info(f"📄 Convertidas {len(invoices)} facturas de {year_month}")
+        
+        # Exportar usando el exportador completo
+        exporter = ExcelExporterCompleto()
+        excel_path = exporter.export_invoices(invoices)
+        
+        if excel_path:
+            return {
+                "success": True,
+                "message": f"Excel completo del mes {year_month} generado exitosamente: {excel_path}",
+                "export_type": "excel_completo",
+                "year_month": year_month,
+                "file_path": excel_path,
+                "invoice_count": len(invoices)
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"Error generando archivo Excel completo para {year_month}",
+                "export_type": "excel_completo",
+                "year_month": year_month
+            }
+            
+    except Exception as e:
+        logger.error(f"Error en export completo month task para {year_month}: {e}")
+        return {
+            "success": False,
+            "message": f"Error en exportación del mes {year_month}: {str(e)}",
+            "export_type": "excel_completo",
+            "year_month": year_month
+        }
+
+# -----------------------------
+# Consultas MongoDB y Exports por Fecha
+# -----------------------------
+
+@app.get("/invoices/months")
+async def get_available_months():
+    """
+    Obtiene lista de meses disponibles con estadísticas básicas desde MongoDB.
+    """
+    try:
+        query_service = get_mongo_query_service()
+        months = query_service.get_available_months()
+        
+        return {
+            "success": True,
+            "months": months,
+            "total_months": len(months)
+        }
+    except Exception as e:
+        logger.error(f"Error obteniendo meses disponibles: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error obteniendo meses: {str(e)}")
+
+@app.get("/invoices/month/{year_month}")
+async def get_invoices_by_month(year_month: str):
+    """
+    Obtiene todas las facturas de un mes específico desde MongoDB.
+    
+    Args:
+        year_month: Mes en formato YYYY-MM
+    """
+    try:
+        # Validar formato
+        try:
+            datetime.strptime(year_month, "%Y-%m")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Formato de mes incorrecto. Use YYYY-MM")
+        
+        query_service = get_mongo_query_service()
+        invoices = query_service.get_invoices_by_month(year_month)
+        
+        return {
+            "success": True,
+            "year_month": year_month,
+            "invoices": invoices,
+            "count": len(invoices)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error obteniendo facturas del mes {year_month}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error obteniendo facturas: {str(e)}")
+
+@app.get("/invoices/month/{year_month}/stats")
+async def get_month_statistics(year_month: str):
+    """
+    Obtiene estadísticas detalladas de un mes específico desde MongoDB.
+    """
+    try:
+        # Validar formato
+        try:
+            datetime.strptime(year_month, "%Y-%m")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Formato de mes incorrecto. Use YYYY-MM")
+        
+        query_service = get_mongo_query_service()
+        stats = query_service.get_month_statistics(year_month)
+        
+        return {
+            "success": True,
+            "statistics": stats
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error obteniendo estadísticas del mes {year_month}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error obteniendo estadísticas: {str(e)}")
+
+@app.post("/invoices/search")
+async def search_invoices(
+    query: str = Query(default="", description="Texto libre para buscar"),
+    start_date: Optional[str] = Query(default=None, description="Fecha inicio YYYY-MM-DD"),
+    end_date: Optional[str] = Query(default=None, description="Fecha fin YYYY-MM-DD"),
+    provider_ruc: Optional[str] = Query(default=None, description="RUC del proveedor"),
+    client_ruc: Optional[str] = Query(default=None, description="RUC del cliente"),
+    min_amount: Optional[float] = Query(default=None, description="Monto mínimo"),
+    max_amount: Optional[float] = Query(default=None, description="Monto máximo"),
+    limit: int = Query(default=100, description="Límite de resultados")
+):
+    """
+    Búsqueda avanzada de facturas en MongoDB con múltiples filtros.
+    """
+    try:
+        query_service = get_mongo_query_service()
+        results = query_service.search_invoices(
+            query=query,
+            start_date=start_date,
+            end_date=end_date,
+            provider_ruc=provider_ruc,
+            client_ruc=client_ruc,
+            min_amount=min_amount,
+            max_amount=max_amount,
+            limit=limit
+        )
+        
+        return {
+            "success": True,
+            "results": results,
+            "count": len(results),
+            "limit": limit
+        }
+    except Exception as e:
+        logger.error(f"Error en búsqueda de facturas: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en búsqueda: {str(e)}")
+
+@app.get("/invoices/recent-activity")
+async def get_recent_activity(days: int = Query(default=7, description="Días hacia atrás")):
+    """
+    Obtiene actividad reciente del sistema desde MongoDB.
+    """
+    try:
+        query_service = get_mongo_query_service()
+        activity = query_service.get_recent_activity(days)
+        
+        return {
+            "success": True,
+            "activity": activity
+        }
+    except Exception as e:
+        logger.error(f"Error obteniendo actividad reciente: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error obteniendo actividad: {str(e)}")
+
+@app.get("/export/excel-from-mongodb/{year_month}")
+async def export_excel_from_mongodb(year_month: str, 
+                                   export_type: str = Query(default="completo", 
+                                                          description="Tipo de export: ascont, completo")):
+    """
+    Exporta Excel de un mes específico consultando directamente desde MongoDB.
+    
+    Args:
+        year_month: Mes en formato YYYY-MM
+        export_type: Tipo de export (ascont o completo)
+    """
+    try:
+        # Validar formato
+        try:
+            datetime.strptime(year_month, "%Y-%m")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Formato de mes incorrecto. Use YYYY-MM")
+        
+        if export_type not in ["ascont", "completo"]:
+            raise HTTPException(status_code=400, detail="Tipo de export debe ser 'ascont' o 'completo'")
+        
+        # Obtener facturas desde MongoDB
+        query_service = get_mongo_query_service()
+        mongo_invoices = query_service.get_invoices_by_month(year_month)
+        
+        if not mongo_invoices:
+            raise HTTPException(status_code=404, detail=f"No se encontraron facturas para {year_month}")
+        
+        # Convertir documentos MongoDB a InvoiceData (simplificado para el export)
+        invoices = []
+        for doc in mongo_invoices:
+            # Crear InvoiceData básico desde documento MongoDB
+            invoice_data = _mongo_doc_to_invoice_data(doc)
+            invoices.append(invoice_data)
+        
+        # Exportar según tipo
+        if export_type == "completo":
+            exporter = ExcelExporterCompleto()
+            excel_path = exporter.export_invoices(invoices)
+            filename = f"facturas_completas_{year_month}.xlsx"
+        else:  # ascont
+            from app.modules.excel_exporter import ExcelExporterASCONT
+            exporter = ExcelExporterASCONT()
+            excel_path = exporter.export_invoices(invoices)
+            filename = f"facturas_ascont_{year_month}.xlsx"
+        
+        if not excel_path or not os.path.exists(excel_path):
+            raise HTTPException(status_code=500, detail="Error generando archivo Excel")
+        
+        response = FileResponse(
+            path=excel_path,
+            filename=filename,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exportando Excel desde MongoDB: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en export: {str(e)}")
+
+def _mongo_doc_to_invoice_data(doc: Dict[str, Any]) -> InvoiceData:
+    """
+    Convierte documento MongoDB a InvoiceData para compatibilidad con exportadores existentes.
+    """
+    try:
+        # Extraer datos principales
+        factura = doc.get("factura", {})
+        emisor = doc.get("emisor", {})
+        receptor = doc.get("receptor", {})
+        montos = doc.get("montos", {})
+        productos = doc.get("productos", [])
+        
+        # Convertir fecha
+        fecha = None
+        if factura.get("fecha"):
+            try:
+                fecha = datetime.fromisoformat(factura["fecha"].replace("Z", "+00:00"))
+            except:
+                pass
+        
+        # Crear InvoiceData
+        invoice = InvoiceData(
+            numero_factura=factura.get("numero", ""),
+            fecha=fecha,
+            ruc_emisor=emisor.get("ruc", ""),
+            nombre_emisor=emisor.get("nombre", ""),
+            ruc_cliente=receptor.get("ruc", ""),
+            nombre_cliente=receptor.get("nombre", ""),
+            email_cliente=receptor.get("email", ""),
+            monto_total=montos.get("monto_total", 0),
+            subtotal_exentas=montos.get("subtotal_exentas", 0),
+            subtotal_5=montos.get("subtotal_5", 0),
+            subtotal_10=montos.get("subtotal_10", 0),
+            iva_5=montos.get("iva_5", 0),
+            iva_10=montos.get("iva_10", 0),
+            iva=montos.get("total_iva", 0)
+        )
+        
+        # Agregar campos adicionales si están disponibles
+        if "datos_tecnicos" in doc:
+            datos_tec = doc["datos_tecnicos"]
+            invoice.cdc = datos_tec.get("cdc", "")
+            invoice.timbrado = datos_tec.get("timbrado", "")
+        
+        # Agregar metadata
+        if "metadata" in doc:
+            metadata = doc["metadata"]
+            invoice.email_origen = metadata.get("email_origen", "")
+            invoice.mes_proceso = doc.get("indices", {}).get("year_month", "")
+        
+        return invoice
+        
+    except Exception as e:
+        logger.error(f"Error convirtiendo documento MongoDB: {e}")
+        # Retornar InvoiceData mínimo en caso de error
+        return InvoiceData(
+            numero_factura=doc.get("factura_id", "ERROR"),
+            fecha=datetime.now(),
+            ruc_emisor="",
+            nombre_emisor="Error en conversión",
+            ruc_cliente="",
+            nombre_cliente="",
+            email_cliente="",
+            monto_total=0
+        )

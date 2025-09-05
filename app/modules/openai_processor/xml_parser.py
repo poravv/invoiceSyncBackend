@@ -506,6 +506,11 @@ class ParaguayanXMLParser:
         normalized['total_iva'] = total_iva
         normalized['total_base_gravada'] = total_base
         normalized['total_general'] = data.get('total_general', total_general)
+        
+        # Asignar monto_total - usar total_operacion del XML o calcular si no existe
+        if 'monto_total' not in normalized:
+            # Priorizar total_operacion del XML (dTotOpe) o usar total_general calculado
+            normalized['monto_total'] = data.get('total_operacion', total_general)
 
         # Productos al formato del modelo
         productos = []

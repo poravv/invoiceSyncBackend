@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     # Configuración de OpenAI
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     
+    # Configuración de MongoDB
+    MONGODB_URL: str = os.getenv("MONGODB_URL", "mongodb://invoicesync:invoicesync2025@mongodb:27017/invoicesync_warehouse?authSource=admin")
+    MONGODB_DATABASE: str = os.getenv("MONGODB_DATABASE", "invoicesync_warehouse")
+    MONGODB_COLLECTION: str = os.getenv("MONGODB_COLLECTION", "facturas_completas")
+    
     # Configuraciones de la API
     API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
     API_PORT: int = int(os.getenv("API_PORT", 8000))
