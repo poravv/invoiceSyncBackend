@@ -1,4 +1,4 @@
-from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, Query
+from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, Query, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import os
@@ -9,6 +9,9 @@ import time
 from typing import List, Optional, Dict, Any
 import shutil
 from datetime import datetime
+
+# Importar validadores de seguridad
+from app.utils.validators import SecurityValidators, DataValidators, ValidationError, log_security_event
 from fastapi.responses import FileResponse
 from fastapi import Response
 from pydantic import BaseModel
@@ -1465,19 +1468,25 @@ async def get_invoices_by_month(year_month: str):
         raise HTTPException(status_code=500, detail=f"Error obteniendo facturas: {str(e)}")
 
 @app.get("/invoices/month/{year_month}/stats")
-async def get_month_statistics(year_month: str):
+async def get_month_statistics(request: Request, year_month: str):
     """
     Obtiene estadísticas detalladas de un mes específico desde MongoDB.
     """
+    client_ip = request.client.host if request.client else "unknown"
+    
     try:
-        # Validar formato
+        # Validación de seguridad
         try:
-            datetime.strptime(year_month, "%Y-%m")
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Formato de mes incorrecto. Use YYYY-MM")
+            SecurityValidators.validate_year_month(year_month)
+        except ValidationError as e:
+            log_security_event("validation_error", {"error": str(e), "year_month": year_month}, client_ip)
+            raise HTTPException(status_code=400, detail=str(e))
         
         query_service = get_mongo_query_service()
         stats = query_service.get_month_statistics(year_month)
+        
+        # Log acceso a estadísticas
+        logger.info(f"📊 Stats solicitadas para {year_month} por IP {client_ip}")
         
         return {
             "success": True,
@@ -1544,7 +1553,8 @@ async def get_recent_activity(days: int = Query(default=7, description="Días ha
         raise HTTPException(status_code=500, detail=f"Error obteniendo actividad: {str(e)}")
 
 @app.get("/export/excel-from-mongodb/{year_month}")
-async def export_excel_from_mongodb(year_month: str, 
+async def export_excel_from_mongodb(request: Request,
+                                   year_month: str, 
                                    export_type: str = Query(default="completo", 
                                                           description="Tipo de export: ascont, completo")):
     """
@@ -1554,15 +1564,16 @@ async def export_excel_from_mongodb(year_month: str,
         year_month: Mes en formato YYYY-MM
         export_type: Tipo de export (ascont o completo)
     """
+    client_ip = request.client.host if request.client else "unknown"
+    
     try:
-        # Validar formato
+        # Validaciones de seguridad
         try:
-            datetime.strptime(year_month, "%Y-%m")
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Formato de mes incorrecto. Use YYYY-MM")
-        
-        if export_type not in ["ascont", "completo"]:
-            raise HTTPException(status_code=400, detail="Tipo de export debe ser 'ascont' o 'completo'")
+            SecurityValidators.validate_year_month(year_month)
+            SecurityValidators.validate_export_type(export_type)
+        except ValidationError as e:
+            log_security_event("validation_error", {"error": str(e), "year_month": year_month, "export_type": export_type}, client_ip)
+            raise HTTPException(status_code=400, detail=str(e))
         
         # Obtener facturas desde MongoDB
         query_service = get_mongo_query_service()
@@ -1570,6 +1581,9 @@ async def export_excel_from_mongodb(year_month: str,
         
         if not mongo_invoices:
             raise HTTPException(status_code=404, detail=f"No se encontraron facturas para {year_month}")
+        
+        # Log acceso a datos
+        logger.info(f"📥 Export solicitud: {export_type} para {year_month} por IP {client_ip} - {len(mongo_invoices)} facturas")
         
         # Convertir documentos MongoDB a InvoiceData (simplificado para el export)
         invoices = []
